@@ -305,7 +305,15 @@ def parse_args(input_args=None):
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
         ),
-    )
+    ),
+    parser.add_argument(
+        "--center_crop",
+        action="store_true",
+        default=False,
+        help=(
+            "Whether to center crop the input images to the resolution. If not set, the images will be resized to the resolution."
+        ),
+    ),
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
     )
