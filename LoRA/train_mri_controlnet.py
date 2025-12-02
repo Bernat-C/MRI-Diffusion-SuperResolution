@@ -743,10 +743,7 @@ def make_train_dataset(args, tokenizer, accelerator):
         images = [ensure_image(image).convert("RGB") for image in examples[image_column]]
         conditioning_images = [ensure_image(image).convert("RGB") for image in examples[conditioning_image_column]]
 
-        images = [image.convert("RGB") for image in examples[image_column]]
         #images = [image_transforms(image) for image in images]
-
-        conditioning_images = [image.convert("RGB") for image in examples[conditioning_image_column]]
         #conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
         
         pixel_values = []
