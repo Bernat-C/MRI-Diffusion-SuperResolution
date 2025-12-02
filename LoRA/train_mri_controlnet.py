@@ -731,6 +731,18 @@ def make_train_dataset(args, tokenizer, accelerator):
         return image, cond_image
 
     def preprocess_train(examples):
+        
+        def ensure_image(content):
+            if isinstance(content, str):
+                # If it's a string, it is a path from the JSONL file.
+                # We need to create the full path and open it.
+                full_path = os.path.join(args.train_data_dir, content)
+                return Image.open(full_path)
+            return content
+
+        images = [ensure_image(image).convert("RGB") for image in examples[image_column]]
+        conditioning_images = [ensure_image(image).convert("RGB") for image in examples[conditioning_image_column]]
+
         images = [image.convert("RGB") for image in examples[image_column]]
         #images = [image_transforms(image) for image in images]
 
