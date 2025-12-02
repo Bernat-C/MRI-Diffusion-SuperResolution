@@ -28,6 +28,7 @@ import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 import torch.utils.checkpoint
 import transformers
 from accelerate import Accelerator
@@ -484,12 +485,12 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--image_column", type=str, default="image", help="The column of the dataset containing the target image."
+        "--image_column", type=str, default="hr", help="The column of the dataset containing the target image."
     )
     parser.add_argument(
         "--conditioning_image_column",
         type=str,
-        default="conditioning_image",
+        default="lr",
         help="The column of the dataset containing the controlnet conditioning image.",
     )
     parser.add_argument(
@@ -676,32 +677,69 @@ def make_train_dataset(args, tokenizer, accelerator):
         )
         return inputs.input_ids
 
-    image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
+    # image_transforms = transforms.Compose(
+    #     [
+    #         transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+    #         transforms.CenterCrop(args.resolution),
+    #         transforms.ToTensor(),
+    #         transforms.Normalize([0.5], [0.5]),
+    #     ]
+    # )
 
-    conditioning_image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
-            transforms.ToTensor(),
-        ]
-    )
+    # conditioning_image_transforms = transforms.Compose(
+    #     [
+    #         transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+    #         transforms.CenterCrop(args.resolution),
+    #         transforms.ToTensor(),
+    #     ]
+    # )
+
+    def train_transforms_pair(image, cond_image):
+        # A. Resize (Bilinear is standard for MRI structure)
+        image = TF.resize(image, args.resolution, interpolation=transforms.InterpolationMode.BILINEAR)
+        cond_image = TF.resize(cond_image, args.resolution, interpolation=transforms.InterpolationMode.BILINEAR)
+
+        # B. Center Crop ONLY (Critical for MRI to avoid misalignment)
+        if args.center_crop:
+            image = TF.center_crop(image, (args.resolution, args.resolution))
+            cond_image = TF.center_crop(cond_image, (args.resolution, args.resolution))
+        
+        # C. Color Conversion (Handle MRI Grayscale -> Fake RGB)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        if cond_image.mode != "RGB":
+            cond_image = cond_image.convert("RGB")
+
+        # D. To Tensor
+        image = TF.to_tensor(image)
+        cond_image = TF.to_tensor(cond_image)
+
+        # E. Normalize
+        # Target (High Field): Normalize to [-1, 1] for SD v1.5
+        image = TF.normalize(image, [0.5], [0.5])
+        # Condition (Low Field): ControlNet expects [0, 1], so we usually don't normalize 
+        # or we explicitly check the specific ControlNet config. 
+        # For standard ControlNet, leaving it as [0,1] (output of to_tensor) is correct.
+
+        return image, cond_image
 
     def preprocess_train(examples):
         images = [image.convert("RGB") for image in examples[image_column]]
-        images = [image_transforms(image) for image in images]
+        #images = [image_transforms(image) for image in images]
 
         conditioning_images = [image.convert("RGB") for image in examples[conditioning_image_column]]
-        conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
+        #conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
+        
+        pixel_values = []
+        conditioning_pixel_values = []
 
-        examples["pixel_values"] = images
-        examples["conditioning_pixel_values"] = conditioning_images
+        for img, cond in zip(images, conditioning_images):
+            p_img, p_cond = train_transforms_pair(img, cond)
+            pixel_values.append(p_img)
+            conditioning_pixel_values.append(p_cond)
+
+        examples["pixel_values"] = pixel_values
+        examples["conditioning_pixel_values"] = conditioning_pixel_values
         examples["input_ids"] = tokenize_captions(examples)
 
         return examples
