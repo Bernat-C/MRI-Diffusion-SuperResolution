@@ -12,6 +12,7 @@ from monai.transforms import (
     EnsureChannelFirstd,
     OrientationD,
     ScaleIntensityRangeD,
+    ResizeD,
     ToTensorD
 )
 
@@ -77,7 +78,7 @@ class PairedMRIDataset(Dataset):
         return data_item
 
 keys = ['lr', 'hr'] # Keys from the get_data_dicts
-basic_transform = Compose([
+transform = Compose([
     # Opens the path using nibabel and turns the file into a numpy array.
     LoadImageD(keys=keys),
     # Add the batch dimension at the begining [Batch, Channel, H, W, D]
@@ -92,6 +93,8 @@ basic_transform = Compose([
         keys=keys, a_min=0, a_max=1000,
         b_min=0.0, b_max=1.0, clip=True
     ),
+    # Make sure everything is getting the correct dimensions
+    ResizeD(keys=keys, spatial_size=(512, 512, 128)),
     # To Tensor!
     ToTensorD(keys=keys)
 ])
@@ -111,8 +114,8 @@ def save_paired_slices(lr_vol, hr_vol, output_dir, prefix):
     if torch.is_tensor(hr_vol): hr_vol = hr_vol.cpu().numpy()
     
     axes_map = {
-        'sagittal': 0, # Slicing from side to side
-        'coronal':  1, # Slicing from front to back
+        #'sagittal': 0, # Slicing from side to side
+        #'coronal':  1, # Slicing from front to back
         'axial':    2  # Slicing from top to bottom
     }
 
@@ -126,14 +129,8 @@ def save_paired_slices(lr_vol, hr_vol, output_dir, prefix):
 
         print(f"Processing {prefix} | {axis_name} | Scale {scale} | num slices {num_slices} | LR Shape: {lr_vol.shape} | HR Shape: {hr_vol.shape}")
 
-        for i in tqdm(range(num_slices), desc=f"Extracting {axis_name}"):
-            
-            # 1. Slicing Logic
-            # We use Python's slice(None) which is equivalent to ':'
-            # If axis is 0: [i, :, :]
-            # If axis is 1: [:, i, :]
-            # If axis is 2: [:, :, i]
-            
+        for i in range(num_slices):
+                        
             idx_lr = [slice(None)] * 3
             idx_lr[axis_idx] = i
             
@@ -152,37 +149,26 @@ def save_paired_slices(lr_vol, hr_vol, output_dir, prefix):
 
 if __name__ == "__main__":
     
-
     data_dir = Path('data/Paired 64mT and 3T Brain MRI Scans of Healthy Subjects for Neuroimaging Research v3/Data')
     output_dir = Path("data/Paired 64mT and 3T Brain MRI Scans of Healthy Subjects for Neuroimaging Research v3/processed")
     
     try:
-        train_ds = PairedMRIDataset(root_dir=data_dir, transform=basic_transform)
-
+        train_ds = PairedMRIDataset(root_dir=data_dir, transform=transform)
         print(len(train_ds), "paired scans found in the dataset.")
 
         train_loader = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=2)
 
-        batch = next(iter(train_loader))
-        
-        while batch:
-            batch_size = batch['lr'].shape[0]
+        for i, batch in enumerate(train_loader):
+            lr_img_3d = batch['lr'][0, 0] 
+            hr_img_3d = batch['hr'][0, 0]
             
-            for b in range(batch_size):
-                # Extract volumes (removing channel dim [0])
-                lr_img_3d = batch['lr'][b, 0] 
-                hr_img_3d = batch['hr'][b, 0]
-                
-                # Generate a name for this item (e.g., batch index)
-                vol_name = f"vol_{b:03d}"
-                
-                # Run generation
-                save_paired_slices(lr_img_3d, hr_img_3d, output_dir, vol_name)
+            # Generate a unique name
+            vol_name = f"vol_{i:03d}"
+            
+            # Run generation
+            save_paired_slices(lr_img_3d, hr_img_3d, output_dir, vol_name)
 
-            print(f"\nProcessing complete. Data saved to {output_dir}")
-            batch = next(iter(train_loader))
+        print(f"\nProcessing complete. Data saved to {output_dir}")
 
-    except NameError:
-        print("Error: 'train_loader' is not defined. Please paste this function below your dataloader code.")
     except Exception as e:
         print(f"An error occurred: {e}")
