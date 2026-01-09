@@ -1,0 +1,361 @@
+import random
+import torch
+import numpy as np
+from transformers import PretrainedConfig
+from typing import Dict, Union
+from accelerate import Accelerator
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from diffusers import (
+    AutoencoderKL,
+    DDPMScheduler,
+    UNet2DConditionModel,
+)
+
+from t2iadapter.config import T2IConfig
+
+
+def import_model_class_from_model_name_or_path(
+    pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
+):
+    text_encoder_config = PretrainedConfig.from_pretrained(
+        pretrained_model_name_or_path, subfolder=subfolder, revision=revision
+    )
+    model_class = text_encoder_config.architectures[0]
+
+    if model_class == "CLIPTextModel":
+        from transformers import CLIPTextModel
+
+        return CLIPTextModel
+    elif model_class == "CLIPTextModelWithProjection":
+        from transformers import CLIPTextModelWithProjection
+
+        return CLIPTextModelWithProjection
+    else:
+        raise ValueError(f"{model_class} is not supported.")
+
+
+# Adapted from pipelines.StableDiffusionXLPipeline.encode_prompt
+def encode_prompt(
+    prompt_batch,
+    text_encoders,
+    tokenizers,
+    proportion_empty_prompts: float,
+    is_train: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    prompt_embeds_list = []
+
+    captions = []
+    for caption in prompt_batch:
+        if random.random() < proportion_empty_prompts:
+            captions.append("")
+        elif isinstance(caption, str):
+            captions.append(caption)
+        elif isinstance(caption, (list, np.ndarray)):
+            # take a random caption if there are multiple
+            captions.append(random.choice(caption) if is_train else caption[0])
+
+    with torch.no_grad():
+        for tokenizer, text_encoder in zip(tokenizers, text_encoders):
+            text_inputs = tokenizer(
+                captions,
+                padding="max_length",
+                max_length=tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            text_input_ids = text_inputs.input_ids
+            prompt_embeds = text_encoder(
+                text_input_ids.to(text_encoder.device),
+                output_hidden_states=True,
+            )
+
+            # We are only ALWAYS interested in the pooled output of the final text encoder
+            pooled_prompt_embeds = prompt_embeds[0]
+            prompt_embeds = prompt_embeds.hidden_states[-2]
+            bs_embed, seq_len, _ = prompt_embeds.shape
+            prompt_embeds = prompt_embeds.view(bs_embed, seq_len, -1)
+            prompt_embeds_list.append(prompt_embeds)
+
+    prompt_embeds: torch.Tensor = torch.concat(prompt_embeds_list, dim=-1)
+    pooled_prompt_embeds: torch.Tensor = pooled_prompt_embeds.view(bs_embed, -1)
+    return prompt_embeds, pooled_prompt_embeds
+
+
+# Simplified encode_prompt for SD1.5 (replace your existing function)
+def encode_prompt_sd1x5(
+    prompt_batch,
+    text_encoders,
+    tokenizers,
+    proportion_empty_prompts: float,
+    is_train: bool = True,
+) -> torch.Tensor:
+    captions = []
+    for caption in prompt_batch:
+        if random.random() < proportion_empty_prompts:  # CFG Dropout enabled here!
+            captions.append("")
+        elif isinstance(caption, str):
+            captions.append(caption)
+        elif isinstance(caption, (list, np.ndarray)):
+            captions.append(random.choice(caption) if is_train else caption[0])
+
+    # SD1.5 only uses the first (and only) text encoder/tokenizer
+    tokenizer = tokenizers[0]
+    text_encoder = text_encoders[0]
+
+    with torch.no_grad():
+        text_inputs = tokenizer(
+            captions,
+            padding="max_length",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids
+        # SD1.5 uses the last hidden state of the standard CLIP Text Model
+        prompt_embeds = text_encoder(
+            text_input_ids.to(text_encoder.device),
+            # SD1.5 does NOT need output_hidden_states=True
+        )[
+            0
+        ]  # [0] extracts the prompt_embeds from the tuple
+    return prompt_embeds  # Shape: [B, 77, 768]
+
+
+# Simplified compute_embeddings for SD1.5 (replace your existing function)
+def compute_embeddings_sd1x5(
+    batch: Dict,
+    proportion_empty_prompts: float,
+    text_encoders,
+    tokenizers,
+    accelerator: Accelerator,
+    is_train: bool = True,
+) -> dict[str, torch.Tensor]:
+    prompt_batch = batch["txt"]
+
+    # Now calls the simplified SD1.5 encoder
+    prompt_embeds = encode_prompt_sd1x5(
+        prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, is_train
+    )
+
+    prompt_embeds = prompt_embeds.to(accelerator.device)
+
+    # SD1.5 UNet only needs the prompt_embeds tensor
+    return {"prompt_embeds": prompt_embeds}  # Return only the required embedding
+
+
+# Here, we compute not just the text embeddings but also the additional embeddings
+# needed for the SD XL UNet to operate.
+def compute_embeddings(
+    batch: Dict,
+    args: T2IConfig,
+    proportion_empty_prompts: float,
+    text_encoders,
+    tokenizers,
+    accelerator: Accelerator,
+    is_train: bool = True,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    original_size = (args.resolution, args.resolution)
+    target_size = (args.resolution, args.resolution)
+    crops_coords_top_left = (args.crops_coords_top_left_h, args.crops_coords_top_left_w)
+    prompt_batch = batch["txt"]
+    prompt_embeds, pooled_prompt_embeds = encode_prompt(
+        prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, is_train
+    )
+    add_text_embeds = pooled_prompt_embeds
+    # Adapted from pipeline.StableDiffusionXLPipeline._get_add_time_ids
+    add_time_ids = list(original_size + crops_coords_top_left + target_size)
+    add_time_ids = torch.tensor([add_time_ids])
+    prompt_embeds = prompt_embeds.to(accelerator.device)
+    add_text_embeds = add_text_embeds.to(accelerator.device)
+    add_time_ids = add_time_ids.repeat(len(prompt_batch), 1)
+    add_time_ids = add_time_ids.to(accelerator.device, dtype=prompt_embeds.dtype)
+    unet_added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+    return {"prompt_embeds": prompt_embeds}, unet_added_cond_kwargs
+
+
+def _percentile_stretch(img: np.ndarray, pmin=1.0, pmax=99.0, eps=1e-6):
+    """Linearly stretch img so that pmin->0 and pmax->1. Works on single image (H,W,C) or (H,W)."""
+    flat = img.flatten()
+    vmin = np.percentile(flat, pmin)
+    vmax = np.percentile(flat, pmax)
+    if vmax - vmin < eps:
+        return np.clip(img - vmin, 0.0, 1.0) * 0.0
+    out = (img - vmin) / (vmax - vmin)
+    return np.clip(out, 0.0, 1.0)
+
+
+def generate_mri_slices(
+    batch: Dict[str, torch.Tensor],
+    adapter: torch.nn.Module,
+    unet: UNet2DConditionModel,
+    vae: AutoencoderKL,
+    noise_scheduler: DDPMScheduler,
+    prompt_embeds: dict[str, torch.Tensor],
+    accelerator: Accelerator,
+    num_inference_steps: int = 500,
+    weight_dtype: torch.dtype = torch.float16,
+    postprocess_mode: str = "percentile",  # options: "none", "percentile"
+    pmin: float = 1.0,
+    pmax: float = 99.0,
+    gamma: Union[
+        float, None
+    ] = None,  # optional gamma correction (e.g. 0.9 or 1.1), None to skip
+):
+    """
+    Performs diffusion inference and returns:
+      - raw decoded images in numpy (B,H,W,C) in [0,1] (as produced by VAE decode & default scaling)
+      - postprocessed images (same shape) according to postprocess_mode
+
+    postprocess_mode:
+      - "none": returns decoded images only (still clipped to [0,1] by default)
+      - "percentile": apply per-image percentile stretch (pmin/pmax) to each generated image independently
+    """
+    device = accelerator.device
+    bsz = batch["hr"].shape[0]
+    h, w = batch["hr"].shape[-2:]
+    condition_sample = batch["lr"].to(device).float().expand(bsz, 3, h, w)
+    adapter.eval()
+    noise_scheduler.set_timesteps(num_inference_steps, device=device)
+
+    with torch.no_grad():
+        # adapter residuals
+        down_block_additional_residuals = adapter(condition_sample)
+        latent_shape = (bsz, unet.config.in_channels, h // 8, w // 8)
+        latents_gen = torch.randn(latent_shape, device=device, dtype=weight_dtype)
+        latents_gen = latents_gen * noise_scheduler.init_noise_sigma
+
+        for t in noise_scheduler.timesteps:
+            latent_model_input = noise_scheduler.scale_model_input(latents_gen, t)
+            noise_pred = unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states=prompt_embeds,
+                down_block_additional_residuals=[
+                    sample.to(dtype=weight_dtype)
+                    for sample in down_block_additional_residuals
+                ],
+            ).sample
+            latents_gen = noise_scheduler.step(noise_pred, t, latents_gen).prev_sample
+
+        # decode latents -> images
+        latents_gen = latents_gen.float() / vae.config.scaling_factor
+        image_batch = vae.decode(latents_gen).sample  # expected in [-1,1] for many VAEs
+        # convert to [0,1]
+        image_batch = (image_batch / 2.0 + 0.5).clamp(0.0, 1.0)
+
+        # Move back to CPU: (B, C, H, W) -> (B, H, W, C)
+        image_batch_np: np.ndarray = (
+            image_batch.cpu().permute(0, 2, 3, 1).float().numpy()
+        )
+        # Prepare postprocessed copy
+        postprocessed = np.empty_like(image_batch_np)
+
+        for i in range(bsz):
+            gen: np.ndarray = image_batch_np[i]  # (H,W,C) or (H,W,3)
+            # if single channel in last dim, keep shape
+            if gen.ndim == 3 and gen.shape[2] == 1:
+                gen_img = np.squeeze(gen, axis=2)
+            else:
+                # for RGB, convert to grayscale for percentile reference (preserve RGB after scaling)
+                gen_img = gen.mean(axis=2)
+
+            if postprocess_mode == "none":
+                proc: np.ndarray = gen.copy()
+            elif postprocess_mode == "percentile":
+                # stretch generated image itself
+                if gen.ndim == 3 and gen.shape[2] > 1:
+                    # scale each channel with the same factors
+                    vmin = np.percentile(gen_img, pmin)
+                    vmax = np.percentile(gen_img, pmax)
+                    if vmax - vmin < 1e-6:
+                        proc = np.clip(gen, 0.0, 1.0)
+                    else:
+                        proc = (gen - vmin) / (vmax - vmin)
+                        proc = np.clip(proc, 0.0, 1.0)
+                else:
+                    proc = _percentile_stretch(gen, pmin=pmin, pmax=pmax)
+                    if proc.ndim == 2:  # expand back to H,W,1
+                        proc = proc[..., None]
+            else:
+                raise ValueError(f"Unknown postprocess_mode: {postprocess_mode}")
+
+            # optional gamma
+            if gamma is not None:
+                proc = np.clip(proc, 0.0, 1.0) ** gamma
+            # ensure shape (H,W,C) even for grayscale
+            if proc.ndim == 2:
+                proc = proc[..., None]
+            postprocessed[i] = proc
+        return image_batch_np, postprocessed
+
+
+def plot_generated_and_ground_truth(
+    generated_slices_np: np.ndarray,
+    batch: Dict[str, torch.Tensor],
+    postprocessed: np.ndarray = None,
+    num_images_to_show: int = 4,
+):
+    """
+    - generated_slices_np: raw decoded images (B,H,W,C)
+    - postprocessed: optional array (B,H,W,C) of postprocessed for display
+    """
+    hr_slices_np = batch["hr"].cpu().numpy()
+    if hr_slices_np.shape[1] == 1:
+        hr_slices_np = np.squeeze(hr_slices_np, axis=1)  # -> (B, H, W)
+    lr_slices_np = batch["lr"].cpu().numpy()
+    if lr_slices_np.shape[1] == 1:
+        lr_slices_np = np.squeeze(lr_slices_np, axis=1)  # -> (B, H, W)
+
+    if generated_slices_np.ndim == 4 and generated_slices_np.shape[3] == 1:
+        gen_raw = np.squeeze(generated_slices_np, axis=3)  # (B,H,W)
+    else:
+        gen_raw = generated_slices_np
+
+    if postprocessed is None:
+        gen_vis = gen_raw.copy()
+    else:
+        gen_vis = postprocessed
+
+    batch_size = gen_vis.shape[0]
+    num_plots = min(batch_size, num_images_to_show)
+    axes: Union[np.ndarray, Axes]
+    _, axes = plt.subplots(
+        nrows=num_plots, ncols=4, figsize=(14, num_plots * 4), dpi=100
+    )
+    if num_plots == 1:
+        axes = axes[np.newaxis, :]
+
+    for i in range(num_plots):
+        # raw gen
+        ax: Axes = axes[i, 0]
+        if gen_raw.ndim == 3:  # grayscale (B,H,W)
+            ax.imshow(gen_raw[i], cmap="gray", vmin=0.0, vmax=1.0)
+        else:
+            ax.imshow(gen_raw[i])
+        ax.set_title(f"Generated RAW {i+1}")
+        ax.axis("off")
+
+        # postprocessed gen
+        ax = axes[i, 1]
+        if gen_vis.ndim == 3:
+            ax.imshow(gen_vis[i], cmap="gray", vmin=0.0, vmax=1.0)
+        else:
+            ax.imshow(gen_vis[i])
+        ax.set_title(f"Generated POST {i+1}")
+        ax.axis("off")
+
+        # GT
+        ax = axes[i, 2]
+        ax.imshow(hr_slices_np[i], cmap="gray", vmin=0.0, vmax=1.0)
+        ax.set_title(f"GT HR {i+1}")
+        ax.axis("off")
+
+        # LR
+        ax = axes[i, 3]
+        ax.imshow(lr_slices_np[i], cmap="gray", vmin=0.0, vmax=1.0)
+        ax.set_title(f"LR {i+1}")
+        ax.axis("off")
+
+    plt.tight_layout()
+    plt.show()
