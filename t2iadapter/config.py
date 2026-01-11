@@ -16,7 +16,7 @@ class T2IConfig:
     train_batch_size: int = 32
     num_train_epochs: int = 100
     max_train_steps: int = 2000
-    checkpointing_steps: int = 200
+    checkpointing_steps: int = 500
     gradient_accumulation_steps: int = 1
     gradient_checkpointing: bool = True
     learning_rate: float = 1e-5
@@ -36,8 +36,12 @@ class T2IConfig:
     logging_dir: str = "./logs/t2i_adapter"
     allow_tf32: bool = False
     report_to: str = "wandb"
+    media_reporting_step: int = 100
     mixed_precision: Union[str, None] = None
     enable_xformers_memory_efficient_attention: bool = False
     set_grads_to_none: bool = False
     proportion_empty_prompts: float = 0.1
     tracker_project_name: str = "mri_t2i_adapter_v1.5"
+    ddpm_scheduler_prediction_type: str = "v_prediction"  # velocity prediction
+    ddpm_scheduler_timestep_spacing: str = "trailing"  # for zero-SNR
+    ddpm_scheduler_rescale_betas_zero_snr: bool = True  # enforces pure noise at t=1000

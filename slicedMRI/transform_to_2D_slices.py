@@ -75,11 +75,11 @@ def get_subject_data_dicts(args: DatasetConfig, verbose=0):
             f"Resulted in {len(train)} train subjects, {len(test)} test subjects, {len(val)} validation subjects"
         )
     if args.mode == "train":
-        return train
+        return [train.dataset[i] for i in train.indices]
     elif args.mode == "test":
-        return test
+        return [test.dataset[i] for i in test.indices]
     elif args.mode == "val":
-        return val
+        return [val.dataset[i] for i in val.indices]
     else:
         return data_dicts
 

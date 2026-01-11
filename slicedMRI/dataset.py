@@ -1,10 +1,12 @@
 import numpy as np
 import torch
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 import SimpleITK as sitk
-from typing import Dict
+from typing import Dict, Union
+import scipy.ndimage
+
 
 from slicedMRI.transform_to_2D_slices import (
     get_subject_data_dicts,
@@ -18,6 +20,120 @@ from slicedMRI.transform_to_2D_slices import (
 from slicedMRI.config import DatasetConfig
 
 
+class PairedMRI_MiniDataset(Dataset):
+    """
+    Dataset for 64mT to 3T paired MRI scans for 11 subjects with 24 slices each (total of 264 slices).
+    Utilizes `FLAIR` modality as the subject scans are aligned on the axial slices
+    """
+
+    def __init__(
+        self,
+        config: DatasetConfig,
+        verbose: int = 0,
+    ):
+        """
+        - `config: DatasetConfig`
+        - `verbose: int = 0`
+        """
+        self.root_dir = config.data_dir
+        self.verbose = verbose
+        self.subjects = self._get_subject_pairs(
+            seed=config.seed,
+            fractions=config.fractions,
+            mode=config.mode,
+        )
+        self.cache_dir = Path(config.cacha_dir_str)
+        if not self.cache_dir.exists():
+            self.cache_dir.mkdir(parents=True)
+        self.slice_metadata = []
+
+    def _get_subject_pairs(
+        self, seed: int, fractions: tuple[float, float, float], mode: str
+    ) -> list[dict[str, Union[Path, str]]]:
+        dicts = []
+        for subject_path in self.root_dir.glob("sub-*"):
+            subject_id = subject_path.name
+            hr_file = subject_path / "anat" / f"{subject_id}_acq-highres_FLAIR.nii.gz"
+            lr_file = subject_path / "anat" / f"{subject_id}_acq-lowres_FLAIR.nii.gz"
+            if lr_file.exists() and hr_file.exists():
+                dicts.append(
+                    {
+                        "lr": lr_file,
+                        "hr": hr_file,
+                        "txt": f"high quality MRI scan, FLAIR brain slice, 3T high field strength, precise anatomical details, sharp focus, medical imaging",
+                        "subject_id": subject_id,
+                    }
+                )
+        # perform subject level split
+        generator = torch.Generator().manual_seed(seed)
+        train, val, test = random_split(dicts, lengths=fractions, generator=generator)
+        if mode == "train":
+            return [train.dataset[i] for i in train.indices]
+        elif mode == "test":
+            return [test.dataset[i] for i in test.indices]
+        elif mode == "val":
+            return [val.dataset[i] for i in val.indices]
+        else:
+            return dicts
+
+    def _prepare_pairs(self, config: DatasetConfig) -> None:
+        num_slices_per_subject = 24
+        for item in self.subjects:
+            sid = item["subject_id"]
+            cache_file = self.cache_dir / f"minids_{sid}.npz"
+            if cache_file.exists():
+                npz = np.load(cache_file)
+                hr_numpy = npz["hr"]  # shape [1,D,H,W]
+                lr_numpy = npz["lr"]
+            else:
+                # Read with SimpleITK
+                hr_sitk = sitk.ReadImage(item["hr"])
+                hr_numpy = sitk.GetArrayFromImage(hr_sitk)
+                hr_numpy = np.clip(
+                    (hr_numpy - hr_numpy.min()) / (hr_numpy.max() - hr_numpy.min()),
+                    0.0,
+                    1.0,
+                )[
+                    :num_slices_per_subject, 0, 0
+                ]  # images only offer information on first 24 slices
+                lr_sitk = sitk.ReadImage(item["lr"])
+                lr_numpy = scipy.ndimage.zoom(
+                    sitk.GetArrayFromImage(lr_sitk), (1, 3.2, 3.2), order=0
+                )
+                lr_numpy = np.clip(
+                    (lr_numpy - lr_numpy.min()) / (lr_numpy.max() - lr_numpy.min()),
+                    0.0,
+                    1.0,
+                )[
+                    :num_slices_per_subject, 0, 0
+                ]  # images only offer information on first 24 slices
+                np.savez_compressed(cache_file, hr=hr_numpy, lr=lr_numpy)
+            for s_idx in range(num_slices_per_subject):
+                self.slice_metadata.append(
+                    {
+                        "hr_arr": hr_numpy[s_idx, :, :],
+                        "lr_arr": lr_numpy[s_idx, :, :],
+                        "slice_idx": int(s_idx),
+                        "txt": item["txt"],
+                        "subject_id": sid,
+                    }
+                )
+
+    def __len__(self):
+        return len(self.slice_metadata)
+
+    def __getitem__(self, idx) -> Dict:
+        meta = self.slice_metadata[idx]
+        hr = torch.from_numpy(meta["hr_arr"]).float()  # [1,H,W]
+        lr = torch.from_numpy(meta["lr_arr"]).float()  # [1,H,W]
+        return {
+            "hr": hr,
+            "lr": lr,
+            "txt": meta["txt"],
+            "subject_id": meta["subject_id"],
+        }
+
+
 class PairedMRIDataset(Dataset):
     def __init__(
         self,
@@ -28,7 +144,7 @@ class PairedMRIDataset(Dataset):
         - `config: DatasetConfig`
         - `verbose: int = 0`
         """
-        self.root_dir = config.root_dir
+        self.root_dir = config.data_dir
         self.slice_axis = config.slice_axis
         self.cache_dir = Path(config.cacha_dir_str)
         if not Path.exists():

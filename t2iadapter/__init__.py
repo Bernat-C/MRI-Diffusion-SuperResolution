@@ -7,5 +7,6 @@ from .utils import (
     compute_embeddings_sd1x5,
     compute_embeddings,
     generate_mri_slices,
-    plot_generated_and_ground_truth
+    plot_generated_and_ground_truth,
+    log_configs
 )

@@ -2,7 +2,7 @@ import random
 import torch
 import numpy as np
 from transformers import PretrainedConfig
-from typing import Dict, Union
+from typing import Dict, Union, Any
 from accelerate import Accelerator
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
@@ -13,6 +13,7 @@ from diffusers import (
 )
 
 from t2iadapter.config import T2IConfig
+from slicedMRI.config import DatasetConfig
 
 
 def import_model_class_from_model_name_or_path(
@@ -210,6 +211,10 @@ def generate_mri_slices(
     postprocess_mode:
       - "none": returns decoded images only (still clipped to [0,1] by default)
       - "percentile": apply per-image percentile stretch (pmin/pmax) to each generated image independently
+
+    returns:
+      - `image_batch_np` of shape (B, H, W, C)
+      - `postprocessed` of shape (B, H, W, C)
     """
     device = accelerator.device
     bsz = batch["hr"].shape[0]
@@ -359,3 +364,38 @@ def plot_generated_and_ground_truth(
 
     plt.tight_layout()
     plt.show()
+
+
+def log_configs(t2i_config: T2IConfig, dataset_config: DatasetConfig) -> dict[str, Any]:
+    return {
+        "data_dir": dataset_config.data_dir.__str__(),
+        "modality": dataset_config.modality,
+        "slice_axis": dataset_config.slice_axis,
+        "seed": dataset_config.seed,
+        "pretrained_model_name_or_path": t2i_config.pretrained_model_name_or_path,
+        "pretrained_vae_model_name_or_path": t2i_config.pretrained_vae_model_name_or_path,
+        "tokenizer_name": t2i_config.tokenizer_name,
+        "seed_t2i": t2i_config.seed,
+        "resolution": t2i_config.resolution,
+        "crops_coords_top_left_h": t2i_config.crops_coords_top_left_h,
+        "crops_coords_top_left_w": t2i_config.crops_coords_top_left_w,
+        "train_batch_size": t2i_config.train_batch_size,
+        "num_train_epochs": t2i_config.num_train_epochs,
+        "max_train_steps": t2i_config.max_train_steps,
+        "gradient_accumulation_steps": t2i_config.gradient_accumulation_steps,
+        "learning_rate": t2i_config.learning_rate,
+        "scale_lr": t2i_config.scale_lr,
+        "lr_scheduler_name": t2i_config.lr_scheduler_name,
+        "lr_warmup_steps": t2i_config.lr_warmup_steps,
+        "lr_num_cycles": t2i_config.lr_num_cycles,
+        "lr_power": t2i_config.lr_power,
+        "adam_beta1": t2i_config.adam_beta1,
+        "adam_beta2": t2i_config.adam_beta2,
+        "adam_weight_decay": t2i_config.adam_weight_decay,
+        "adam_epsilon": t2i_config.adam_epsilon,
+        "max_grad_norm": t2i_config.max_grad_norm,
+        "proportion_empty_prompts": t2i_config.proportion_empty_prompts,
+        "ddpm_scheduler_prediction_type": t2i_config.ddpm_scheduler_prediction_type,
+        "ddpm_scheduler_timestep_spacing": t2i_config.ddpm_scheduler_timestep_spacing,
+        "ddpm_scheduler_rescale_betas_zero_snr": t2i_config.ddpm_scheduler_rescale_betas_zero_snr,
+    }
