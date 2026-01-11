@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from pathlib import Path
-from functools import factory
 
 
 @dataclass
