@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from functools import factory
 
 
 @dataclass
@@ -25,11 +26,11 @@ class DatasetConfig:
     hr_base: str = "rawdata_BIDS_7T"
     cacha_dir_str: str = "./cache"
     mode: str = "train"  # can be train val or test
-    fractions: tuple[float, float, float] = [
+    fractions: tuple[float, float, float] = (
         0.8,
         0.0,
         0.2,
-    ]  # fractions of subjects for each of the three splits
+    )  # fractions of subjects for each of the three splits
     seed: int = 42
     modality: str = "T2w"
     slice_axis: int = 2
