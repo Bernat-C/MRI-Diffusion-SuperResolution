@@ -219,6 +219,8 @@ def generate_mri_slices(
     device = accelerator.device
     bsz = batch["hr"].shape[0]
     h, w = batch["hr"].shape[-2:]
+    if batch["lr"].ndim == 3:
+        batch["lr"] = batch["lr"].unsqueeze(1)
     condition_sample = batch["lr"].to(device).float().expand(bsz, 3, h, w)
     adapter.eval()
     noise_scheduler.set_timesteps(num_inference_steps, device=device)
@@ -229,7 +231,7 @@ def generate_mri_slices(
         latent_shape = (bsz, unet.config.in_channels, h // 8, w // 8)
         latents_gen = torch.randn(latent_shape, device=device, dtype=weight_dtype)
         latents_gen = latents_gen * noise_scheduler.init_noise_sigma
-
+        print(f"Latents Gen {latents_gen.shape}, ")
         for t in noise_scheduler.timesteps:
             latent_model_input = noise_scheduler.scale_model_input(latents_gen, t)
             noise_pred = unet(

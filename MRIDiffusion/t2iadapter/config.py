@@ -14,6 +14,7 @@ class T2IConfig:
     crops_coords_top_left_h: int = 0
     crops_coords_top_left_w: int = 0
     train_batch_size: int = 32
+    test_batch_size: int = 16
     num_train_epochs: int = 100
     max_train_steps: int = 2000
     checkpointing_steps: int = 500
