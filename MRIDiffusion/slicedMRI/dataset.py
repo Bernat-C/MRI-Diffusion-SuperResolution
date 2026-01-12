@@ -8,7 +8,7 @@ from typing import Dict, Union
 import scipy.ndimage
 
 
-from MRIDiffusion.transform_to_2D_slices import (
+from MRIDiffusion.slicedMRI.transform_to_2D_slices import (
     get_subject_data_dicts,
     n4_bias_correction,
     rigid_register_and_resample,
@@ -17,7 +17,7 @@ from MRIDiffusion.transform_to_2D_slices import (
     crop_volume_along_z_np,
     pad_or_center_crop,
 )
-from MRIDiffusion.config import DatasetConfig
+from MRIDiffusion.slicedMRI.config import DatasetConfig
 
 
 class PairedMRI_MiniDataset(Dataset):
