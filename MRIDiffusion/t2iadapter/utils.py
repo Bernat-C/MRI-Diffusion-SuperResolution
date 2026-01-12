@@ -220,8 +220,9 @@ def generate_mri_slices(
     bsz = batch["hr"].shape[0]
     h, w = batch["hr"].shape[-2:]
     if batch["lr"].ndim == 3:
-        batch["lr"] = batch["lr"].unsqueeze(1)
-    condition_sample = batch["lr"].to(device).float().expand(bsz, 3, h, w)
+        condition_sample = batch["lr"].unsqueeze(1).to(device).float().expand(bsz, 3, h, w)
+    else:
+        condition_sample = batch["lr"].to(device).float().expand(bsz, 3, h, w)
     adapter.eval()
     noise_scheduler.set_timesteps(num_inference_steps, device=device)
 

@@ -59,12 +59,12 @@ class MRIEvaluator:
         generated: torch.Tensor,
         psnr: PeakSignalNoiseRatio,
         ssim: StructuralSimilarityIndexMeasure,
-    ) -> tuple[int]:
+    ) -> tuple[float]:
         return (
             MRIEvaluator.compute_hfen(generated, ground_truth),
             MRIEvaluator.compute_nmse(generated, ground_truth),
-            psnr.compute(generated, ground_truth).item().cpu().numpy(),
-            ssim.compute(generated, ground_truth).item().cpu().numpy(),
+            psnr(generated, ground_truth).item(),
+            ssim(generated, ground_truth).item(),
         )
 
     def evaluate_folders(self, generated_dir, ground_truth_dir):
