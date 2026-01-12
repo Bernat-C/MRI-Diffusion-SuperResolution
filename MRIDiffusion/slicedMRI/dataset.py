@@ -8,7 +8,7 @@ from typing import Dict, Union
 import scipy.ndimage
 
 
-from slicedMRI.transform_to_2D_slices import (
+from MRIDiffusion.transform_to_2D_slices import (
     get_subject_data_dicts,
     n4_bias_correction,
     rigid_register_and_resample,
@@ -17,7 +17,7 @@ from slicedMRI.transform_to_2D_slices import (
     crop_volume_along_z_np,
     pad_or_center_crop,
 )
-from slicedMRI.config import DatasetConfig
+from MRIDiffusion.config import DatasetConfig
 
 
 class PairedMRI_MiniDataset(Dataset):
@@ -46,6 +46,7 @@ class PairedMRI_MiniDataset(Dataset):
         if not self.cache_dir.exists():
             self.cache_dir.mkdir(parents=True)
         self.slice_metadata = []
+        self._prepare_pairs(config)
 
     def _get_subject_pairs(
         self, seed: int, fractions: tuple[float, float, float], mode: str
@@ -94,7 +95,7 @@ class PairedMRI_MiniDataset(Dataset):
                     0.0,
                     1.0,
                 )[
-                    :num_slices_per_subject, 0, 0
+                    :num_slices_per_subject, :, :
                 ]  # images only offer information on first 24 slices
                 lr_sitk = sitk.ReadImage(item["lr"])
                 lr_numpy = scipy.ndimage.zoom(
@@ -105,7 +106,7 @@ class PairedMRI_MiniDataset(Dataset):
                     0.0,
                     1.0,
                 )[
-                    :num_slices_per_subject, 0, 0
+                    :num_slices_per_subject, :, :
                 ]  # images only offer information on first 24 slices
                 np.savez_compressed(cache_file, hr=hr_numpy, lr=lr_numpy)
             for s_idx in range(num_slices_per_subject):

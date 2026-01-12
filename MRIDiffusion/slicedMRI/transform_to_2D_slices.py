@@ -6,8 +6,7 @@ from torch.utils.data import DataLoader, random_split
 import SimpleITK as sitk
 
 
-from slicedMRI.dataset import PairedMRIDataset
-from slicedMRI.config import DatasetConfig
+from MRIDiffusion.slicedMRI.config import DatasetConfig
 
 
 def get_data_dicts(args: DatasetConfig):

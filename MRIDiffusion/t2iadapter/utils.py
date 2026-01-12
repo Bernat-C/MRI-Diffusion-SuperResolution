@@ -12,8 +12,8 @@ from diffusers import (
     UNet2DConditionModel,
 )
 
-from t2iadapter.config import T2IConfig
-from slicedMRI.config import DatasetConfig
+from MRIDiffusion.t2iadapter.config import T2IConfig
+from MRIDiffusion.slicedMRI.config import DatasetConfig
 
 
 def import_model_class_from_model_name_or_path(
