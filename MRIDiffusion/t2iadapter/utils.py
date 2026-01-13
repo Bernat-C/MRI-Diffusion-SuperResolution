@@ -1,5 +1,6 @@
 import random
 import torch
+import torch.nn.functional as F
 import numpy as np
 from transformers import PretrainedConfig
 from typing import Dict, Union, Any
@@ -220,7 +221,9 @@ def generate_mri_slices(
     bsz = batch["hr"].shape[0]
     h, w = batch["hr"].shape[-2:]
     if batch["lr"].ndim == 3:
-        condition_sample = batch["lr"].unsqueeze(1).to(device).float().expand(bsz, 3, h, w)
+        condition_sample = (
+            batch["lr"].unsqueeze(1).to(device).float().expand(bsz, 3, h, w)
+        )
     else:
         condition_sample = batch["lr"].to(device).float().expand(bsz, 3, h, w)
     adapter.eval()
@@ -248,6 +251,10 @@ def generate_mri_slices(
 
         # decode latents -> images
         latents_gen = latents_gen.float() / vae.config.scaling_factor
+        if vae.config['_name_or_path'] == "microsoft/mri-autoencoder-v0.1":
+            latents_gen = F.interpolate(
+                latents_gen, size=(128, 128), mode="bilinear", align_corners=False
+            )
         image_batch = vae.decode(latents_gen).sample  # expected in [-1,1] for many VAEs
         # convert to [0,1]
         image_batch = (image_batch / 2.0 + 0.5).clamp(0.0, 1.0)
