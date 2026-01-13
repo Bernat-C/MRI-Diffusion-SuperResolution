@@ -5,7 +5,9 @@ from typing import Union
 @dataclass
 class T2IConfig:
     pretrained_model_name_or_path: str = "sd-legacy/stable-diffusion-v1-5"
-    pretrained_vae_model_name_or_path: Union[str, None] = None
+    pretrained_vae_model_name_or_path: Union[str, None] = (
+        "microsoft/mri-autoencoder-v0.1"
+    )
     revision: Union[str, None] = None
     tokenizer_name: Union[str, None] = None
     output_dir: str = "./out/t2i_adapter"
@@ -15,8 +17,8 @@ class T2IConfig:
     crops_coords_top_left_w: int = 0
     train_batch_size: int = 32
     test_batch_size: int = 16
-    num_train_epochs: int = 100
-    max_train_steps: int = 2000
+    num_train_epochs: int = 200
+    max_train_steps: int = 4000
     checkpointing_steps: int = 500
     gradient_accumulation_steps: int = 1
     gradient_checkpointing: bool = True
