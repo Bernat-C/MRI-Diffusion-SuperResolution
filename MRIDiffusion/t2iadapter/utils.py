@@ -187,6 +187,8 @@ def _percentile_stretch(img: np.ndarray, pmin=1.0, pmax=99.0, eps=1e-6):
     return np.clip(out, 0.0, 1.0)
 
 
+from typing import Dict, Union, Any, List
+
 def generate_mri_slices(
     batch: Dict[str, torch.Tensor],
     adapter: torch.nn.Module,
@@ -235,7 +237,6 @@ def generate_mri_slices(
         latent_shape = (bsz, unet.config.in_channels, h // 8, w // 8)
         latents_gen = torch.randn(latent_shape, device=device, dtype=weight_dtype)
         latents_gen = latents_gen * noise_scheduler.init_noise_sigma
-        print(f"Latents Gen {latents_gen.shape}, ")
         for t in noise_scheduler.timesteps:
             latent_model_input = noise_scheduler.scale_model_input(latents_gen, t)
             noise_pred = unet(
