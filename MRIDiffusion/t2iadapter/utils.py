@@ -12,6 +12,7 @@ from diffusers import (
     DDPMScheduler,
     UNet2DConditionModel,
 )
+from tqdm import tqdm
 
 from MRIDiffusion.t2iadapter.config import T2IConfig
 from MRIDiffusion.slicedMRI.config import DatasetConfig
@@ -189,6 +190,7 @@ def _percentile_stretch(img: np.ndarray, pmin=1.0, pmax=99.0, eps=1e-6):
 
 from typing import Dict, Union, Any, List
 
+
 def generate_mri_slices(
     batch: Dict[str, torch.Tensor],
     adapter: torch.nn.Module,
@@ -252,7 +254,7 @@ def generate_mri_slices(
 
         # decode latents -> images
         latents_gen = latents_gen.float() / vae.config.scaling_factor
-        if vae.config['_name_or_path'] == "microsoft/mri-autoencoder-v0.1":
+        if vae.config["_name_or_path"] == "microsoft/mri-autoencoder-v0.1":
             latents_gen = F.interpolate(
                 latents_gen, size=(128, 128), mode="bilinear", align_corners=False
             )
@@ -304,6 +306,98 @@ def generate_mri_slices(
                 proc = proc[..., None]
             postprocessed[i] = proc
         return image_batch_np, postprocessed
+
+
+def generate_mri_slices_partial(
+    batch: Dict[str, torch.Tensor],
+    adapter: torch.nn.Module,
+    unet: UNet2DConditionModel,
+    vae: AutoencoderKL,
+    noise_scheduler: DDPMScheduler,
+    prompt_embeds: torch.Tensor,
+    start_step: int,  # The new truncation parameter
+    accelerator: Accelerator,
+    num_inference_steps: int = 500,
+    weight_dtype: torch.dtype = torch.float16,
+):
+    """
+    Performs Partial Diffusion Inference:
+    1. Encodes the LR image to latents (z_LR).
+    2. Adds noise to z_LR to reach state t = start_step.
+    3. Denoises from t = start_step -> 0.
+    """
+    device = accelerator.device
+    bsz = batch["lr"].shape[0]
+    h, w = batch["lr"].shape[-2:]
+    if batch["lr"].ndim == 3:
+        condition_sample = batch["lr"].unsqueeze(1).to(device).float()
+    else:
+        condition_sample = batch["lr"].to(device).float()
+
+    condition_sample = condition_sample.expand(bsz, 3, h, w)
+    adapter.eval()
+    with torch.no_grad():
+        down_block_additional_residuals = adapter(condition_sample)
+        model_name = vae.config.get("_name_or_path", "")
+        is_special_vae = "microsoft/mri-autoencoder-v0.1" in model_name
+
+        if is_special_vae:
+            vae_input = condition_sample[
+                :, :2, :, :
+            ]  # Slice if needed, or expand logic
+            if vae_input.shape[1] != 2:
+                vae_input = (
+                    batch["lr"].unsqueeze(1).expand(bsz, 2, h, w).to(device).float()
+                )
+        else:
+            vae_input = condition_sample
+        # Encode LR -> Latent LR
+        latents_lr = vae.encode(vae_input.to(vae.dtype)).latent_dist.sample()
+        latents_lr = latents_lr * vae.config.scaling_factor
+        latents_lr = latents_lr.to(weight_dtype)
+        # Special VAE downsampling fix (matches training loop logic)
+        if is_special_vae:
+            latents_lr = F.interpolate(
+                latents_lr, size=(64, 64), mode="bilinear", align_corners=False
+            )
+        # Add Noise to reach t = start_step
+        noise = torch.randn_like(latents_lr)
+        timesteps_start = torch.full(
+            (bsz,), start_step, device=device, dtype=torch.long
+        )
+
+        # This is our new starting point: Noisy LR Latents
+        latents_gen = noise_scheduler.add_noise(latents_lr, noise, timesteps_start)
+        noise_scheduler.set_timesteps(num_inference_steps, device=device)
+        # Filter timesteps to only run from start_step -> 0
+        inference_timesteps = [t for t in noise_scheduler.timesteps if t <= start_step]
+        inference_timesteps = torch.tensor(inference_timesteps, device=device)
+        for t in tqdm(
+            inference_timesteps,
+            disable=not accelerator.is_local_main_process,
+            leave=False,
+        ):
+            latent_model_input = noise_scheduler.scale_model_input(latents_gen, t)
+            noise_pred = unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states=prompt_embeds,
+                down_block_additional_residuals=[
+                    sample.to(dtype=weight_dtype)
+                    for sample in down_block_additional_residuals
+                ],
+            ).sample
+
+            latents_gen = noise_scheduler.step(noise_pred, t, latents_gen).prev_sample
+        latents_gen = latents_gen.float() / vae.config.scaling_factor
+        if is_special_vae:
+            latents_gen = F.interpolate(
+                latents_gen, size=(128, 128), mode="bilinear", align_corners=False
+            )
+        image_batch = vae.decode(latents_gen.to(vae.dtype)).sample
+        image_batch = (image_batch / 2.0 + 0.5).clamp(0.0, 1.0)
+        image_batch_np = image_batch.cpu().permute(0, 2, 3, 1).float().numpy()
+        return image_batch_np, None
 
 
 def plot_generated_and_ground_truth(
