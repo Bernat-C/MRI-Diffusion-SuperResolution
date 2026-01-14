@@ -48,3 +48,4 @@ class T2IConfig:
     ddpm_scheduler_prediction_type: str = "v_prediction"  # velocity prediction
     ddpm_scheduler_timestep_spacing: str = "trailing"  # for zero-SNR
     ddpm_scheduler_rescale_betas_zero_snr: bool = True  # enforces pure noise at t=1000
+    partial_start_step: int = 800
