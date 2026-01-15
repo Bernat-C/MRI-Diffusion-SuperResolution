@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from MRIDiffusion.t2iadapter.config import T2IConfig
 from MRIDiffusion.slicedMRI.config import DatasetConfig
+from MRIDiffusion.t2iadapter.MRIProjector import robust_mri_scale
 
 
 def import_model_class_from_model_name_or_path(
@@ -311,6 +312,7 @@ def generate_mri_slices(
 def generate_mri_slices_partial(
     batch: Dict[str, torch.Tensor],
     adapter: torch.nn.Module,
+    mri_projector: torch.nn.Module,
     unet: UNet2DConditionModel,
     vae: AutoencoderKL,
     noise_scheduler: DDPMScheduler,
@@ -328,29 +330,14 @@ def generate_mri_slices_partial(
     """
     device = accelerator.device
     bsz = batch["lr"].shape[0]
-    h, w = batch["lr"].shape[-2:]
-    if batch["lr"].ndim == 3:
-        condition_sample = batch["lr"].unsqueeze(1).to(device).float()
-    else:
-        condition_sample = batch["lr"].to(device).float()
-
-    condition_sample = condition_sample.expand(bsz, 3, h, w)
+    mri_projector.eval()
     adapter.eval()
     with torch.no_grad():
-        down_block_additional_residuals = adapter(condition_sample)
+        vae_input = mri_projector(batch["lr"].to(accelerator.device).float())
+        down_block_additional_residuals = adapter(vae_input)
         model_name = vae.config.get("_name_or_path", "")
         is_special_vae = "microsoft/mri-autoencoder-v0.1" in model_name
 
-        if is_special_vae:
-            vae_input = condition_sample[
-                :, :2, :, :
-            ]  # Slice if needed, or expand logic
-            if vae_input.shape[1] != 2:
-                vae_input = (
-                    batch["lr"].unsqueeze(1).expand(bsz, 2, h, w).to(device).float()
-                )
-        else:
-            vae_input = condition_sample
         # Encode LR -> Latent LR
         latents_lr = vae.encode(vae_input.to(vae.dtype)).latent_dist.sample()
         latents_lr = latents_lr * vae.config.scaling_factor
@@ -394,8 +381,9 @@ def generate_mri_slices_partial(
             latents_gen = F.interpolate(
                 latents_gen, size=(128, 128), mode="bilinear", align_corners=False
             )
-        image_batch = vae.decode(latents_gen.to(vae.dtype)).sample
-        image_batch = (image_batch / 2.0 + 0.5).clamp(0.0, 1.0)
+        image_batch_rgb = vae.decode(latents_gen.to(vae.dtype)).sample
+        image_batch_grey = image_batch_rgb.mean(dim=1, keepdim=True)
+        image_batch = robust_mri_scale(image_batch_grey)
         image_batch_np = image_batch.cpu().permute(0, 2, 3, 1).float().numpy()
         return image_batch_np, None
 
