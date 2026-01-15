@@ -66,6 +66,8 @@ def log_configs(config) -> dict[str, Any]:
         "ddpm_scheduler_prediction_type": config.ddpm_scheduler_prediction_type,
         "ddpm_scheduler_timestep_spacing": config.ddpm_scheduler_timestep_spacing,
         "ddpm_scheduler_rescale_betas_zero_snr": config.ddpm_scheduler_rescale_betas_zero_snr,
+        "lora_alpha": getattr(config, "lora_alpha", None),
+        "lora_rank": getattr(config, "lora_rank", None),
     }
 
 # PROMPT ENCODING
