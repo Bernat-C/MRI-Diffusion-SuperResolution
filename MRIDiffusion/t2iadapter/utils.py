@@ -492,3 +492,12 @@ def log_configs(t2i_config: T2IConfig, dataset_config: DatasetConfig) -> dict[st
         "ddpm_scheduler_timestep_spacing": t2i_config.ddpm_scheduler_timestep_spacing,
         "ddpm_scheduler_rescale_betas_zero_snr": t2i_config.ddpm_scheduler_rescale_betas_zero_snr,
     }
+
+
+def print_trainable_parameters(model: torch.nn.Module, name: str = "Model"):
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    all_params = sum(p.numel() for p in model.parameters())
+    print(
+        f"{name} || trainable params: {trainable_params:,d} || all params: {all_params:,d} || "
+        f"size: {all_params * 4 / (1024**2):.2f} MB"
+    )
