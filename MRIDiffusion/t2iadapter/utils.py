@@ -535,9 +535,9 @@ def generate_mri_slices_partial_dc(
     mri_projector.eval()
     adapter.eval()
     with torch.no_grad():
-        down_block_res = adapter(condition_rgb)
         # Prepare conditioning RGB (projector may do channel conversion / scaling)
         condition_rgb = mri_projector(batch["lr"].to(device).float())
+        down_block_res = adapter(condition_rgb)
         # Encode LR (clean latent) -- adapt to your VAE API
         enc = vae.encode(condition_rgb.to(vae.dtype))
         latents_lr_clean = (
