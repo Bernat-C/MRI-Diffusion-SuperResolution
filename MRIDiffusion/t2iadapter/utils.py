@@ -388,6 +388,265 @@ def generate_mri_slices_partial(
         return image_batch_np, None
 
 
+def make_lowpass_mask(
+    h: int,
+    w: int,
+    reduction_factor: float,
+    device: torch.device,
+    taper_width: float = 0.12,
+):
+    cy, cx = h // 2, w // 2
+    half_h = max(1, int(h / (2.0 * reduction_factor)))
+    half_w = max(1, int(w / (2.0 * reduction_factor)))
+
+    y = torch.arange(h, device=device) - cy
+    x = torch.arange(w, device=device) - cx
+    yy = y.abs().unsqueeze(1) / float(half_h)  # h x 1
+    xx = x.abs().unsqueeze(0) / float(half_w)  # 1 x w
+    radial = torch.max(yy, xx)  # box metric
+
+    # map to [0,1], where <=1 inside low-pass
+    mask = torch.clamp(1.0 - radial, 0.0, 1.0)
+
+    if taper_width is not None and taper_width > 0.0:
+        inner = 1.0 - taper_width
+        outer = 1.0
+        taper = (mask - inner) / (outer - inner + 1e-12)
+        taper = torch.clamp(taper, 0.0, 1.0)
+        # raised cosine on taper fraction
+        mask_cos = 0.5 * (1.0 + torch.cos(torch.clamp(taper, 0.0, 1.0) * torch.pi))
+        # where taper >=1 (fully inside) -> 1.0, where <=0 -> 0.0
+        mask = torch.where(taper >= 1.0, torch.tensor(1.0, device=device), mask_cos)
+        mask = torch.where(taper <= 0.0, torch.tensor(0.0, device=device), mask)
+    else:
+        mask = (mask > 0.0).float()
+
+    return mask.unsqueeze(0).unsqueeze(0)  # shape (1,1,h,w)
+
+
+def apply_frequency_consistency_soft(
+    latents_pred: torch.Tensor,
+    latents_cond: torch.Tensor,
+    reduction_factor: float = 4.0,
+    taper_width: float = 0.12,
+):
+    """
+    Softly replace low-freq bands of latents_pred with latents_cond using a smooth mask.
+    Inputs: (B,C,H,W) real tensors. Returns real tensor (B,C,H,W).
+    """
+    B, C, H, W = latents_pred.shape
+    # FFT (complex)
+    fft_pred: torch.Tensor = torch.fft.fftshift(
+        torch.fft.fft2(latents_pred, norm="ortho"), dim=(-2, -1)
+    )
+    fft_cond: torch.Tensor = torch.fft.fftshift(
+        torch.fft.fft2(latents_cond, norm="ortho"), dim=(-2, -1)
+    )
+    mask = make_lowpass_mask(
+        h=H,
+        w=W,
+        reduction_factor=reduction_factor,
+        device=latents_pred.device,
+        taper_width=taper_width,
+    )  # (1,1,H,W)
+    mask = mask.to(dtype=fft_pred.real.dtype)
+    mask = mask.expand(B, C, H, W)
+    # Complex blend
+    fft_comb = fft_pred * (1.0 - mask) + fft_cond * mask
+    # inverse FFT
+    fft_ishift: torch.Tensor = torch.fft.ifftshift(fft_comb, dim=(-2, -1))
+    latents_corr: torch.Tensor = torch.fft.ifft2(fft_ishift, norm="ortho")
+    # return real part (vae latents are real)
+    return latents_corr.real
+
+
+def generate_mri_slices_partial_dc(
+    batch: Dict[str, torch.Tensor],
+    adapter: torch.nn.Module,
+    mri_projector: torch.nn.Module,
+    unet: UNet2DConditionModel,
+    vae: AutoencoderKL,
+    noise_scheduler: DDPMScheduler,
+    prompt_embeds: torch.Tensor,
+    start_step: int,
+    accelerator: Accelerator,
+    num_inference_steps: int = 500,
+    weight_dtype: torch.dtype = torch.float16,
+    use_data_consistency: bool = True,
+    dc_reduction_factor: float = 4.0,
+    taper: float = 0.12,
+    apply_final_pixel_dc: bool = True,
+    vae_scale: float = None,
+):
+    """
+    Generate MRI slices using partial diffusion (SDEEdit-style init) and latent-space DC.
+
+    Parameters
+    ----------
+    batch : dict
+        Must contain at least "lr" (low-res image tensor shape [B, C, H, W]) and optionally other metadata.
+    adapter : nn.Module
+        T2I Adapter used for conditioning (used here to produce additional residuals for the UNet).
+    mri_projector: callable
+        Function that maps the original LR batch['lr'] into a 3-channel RGB (or model input) space for the adapter/vae.
+    unet : nn.Module
+        The U-Net (diffusion model) used for denoising; expected HF diffusers-like signature.
+    vae : nn.Module
+        VAE with encode/decode. Expected interfaces:
+         - vae.encode(img).latent_dist.sample()  (or adapt if deterministic)
+         - vae.decode(latents) returning object with .sample or a tensor
+    noise_scheduler : object
+        The noise scheduler used for sampling. Expected to provide:
+         - set_timesteps(num_inference_steps, device=device)
+         - timesteps (iterable tensor)
+         - add_noise(x0, noise, timesteps)
+         - scale_model_input(x, t)
+         - step(pred, t, sample) -> returns object with .prev_sample
+    prompt_embeds : tensor
+        Conditioning textual/image embeddings passed to UNet.
+    start_step : int
+        The starting (noisy) timestep to initialize from (SDEEdit skip).
+    accelerator : optional (HF accelerate) - used to get device & local process checks
+    use_data_consistency : bool
+        Whether to apply latent DC at each step (recommended True).
+    dc_reduction_factor : float
+        How much of the central frequencies to preserve from the LR reference (e.g., 4.0 for 4x).
+    taper : float
+        Soft-edge width for the lowpass mask (0..0.5); higher -> smoother blend.
+    apply_final_pixel_dc : bool
+        Whether to apply final pixel-space DC on decoded image (one pass).
+    vae_scale : float | None
+        If your VAE uses a latent scaling factor (LDM style e.g. 0.18215), pass it here. If None, attempt to read from vae.config.
+
+    Returns
+    -------
+    final_image_np : numpy array of shape (B, H, W, 1) or (B, H, W, C)
+    None
+        (second return kept for API compatibility)
+    """
+
+    device = (
+        accelerator.device
+        if accelerator is not None
+        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model_name = vae.config.get("_name_or_path", "")
+    is_special_vae = "microsoft/mri-autoencoder-v0.1" in model_name
+    mri_projector.eval()
+    adapter.eval()
+    with torch.no_grad():
+        down_block_res = adapter(condition_rgb)
+        # Prepare conditioning RGB (projector may do channel conversion / scaling)
+        condition_rgb = mri_projector(batch["lr"].to(device).float())
+        # Encode LR (clean latent) -- adapt to your VAE API
+        enc = vae.encode(condition_rgb.to(vae.dtype))
+        latents_lr_clean = (
+            enc.latent_dist.sample() if hasattr(enc, "latent_dist") else enc
+        )
+    if vae_scale is None:
+        vae_scale = getattr(
+            getattr(vae, "config", {}), "scaling_factor", None
+        ) or getattr(vae, "scaling_factor", 1.0)
+    latents_lr_clean = latents_lr_clean * vae_scale
+    latents_lr_clean = latents_lr_clean.to(weight_dtype)
+    if is_special_vae:
+        latents_lr_clean = F.interpolate(
+            latents_lr_clean, size=(64, 64), mode="bilinear", align_corners=False
+        )
+    # Initialize noise
+    noise_init = torch.randn_like(latents_lr_clean, device=device)
+    # SDEEdit-style init: add noise at start_step using the SAME noise_init
+    bsz = latents_lr_clean.shape[0]
+    timesteps_start = torch.full(
+        (bsz,), int(start_step), device=device, dtype=torch.long
+    )
+    latents_gen = noise_scheduler.add_noise(
+        latents_lr_clean, noise_init, timesteps_start
+    )
+    noise_scheduler.set_timesteps(num_inference_steps, device=device)
+    # Only keep timesteps that are <= start_step (we will denoise from start_step downwards)
+    inference_timesteps = [t for t in noise_scheduler.timesteps if t <= start_step]
+    inference_timesteps = torch.tensor(inference_timesteps, device=device)
+    for t in tqdm(
+        inference_timesteps,
+        disable=(accelerator is not None and not accelerator.is_local_main_process),
+        leave=False,
+    ):
+        # scale model input (scheduler-specific)
+        latent_model_input = noise_scheduler.scale_model_input(latents_gen, t)
+        with torch.no_grad():
+            unet_out = unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states=prompt_embeds,
+                down_block_additional_residuals=[
+                    s.to(weight_dtype) for s in down_block_res
+                ],
+            )
+            noise_pred = unet_out.sample if hasattr(unet_out, "sample") else unet_out
+        step_output = noise_scheduler.step(noise_pred, t, latents_gen)
+        latents_gen = step_output.prev_sample
+        # Apply latent-space data consistency (soft replacement) if requested
+        if use_data_consistency:
+            # compute noisy-lr at the same timestep using the SAME noise_init
+            ts_cur = torch.full(
+                (bsz,),
+                int(t.item()) if isinstance(t, torch.Tensor) else int(t),
+                device=device,
+                dtype=torch.long,
+            )
+            noisy_lr_at_t = noise_scheduler.add_noise(
+                latents_lr_clean, noise_init, ts_cur
+            )
+            # soft frequency replacement on *noisy* latents (keeps noise alignment)
+            latents_gen = apply_frequency_consistency_soft(
+                latents_gen,
+                noisy_lr_at_t,
+                reduction_factor=dc_reduction_factor,
+                taper_width=taper,
+            )
+    latents_to_decode = latents_gen.float() / float(vae_scale)
+    if is_special_vae:
+        latents_to_decode = F.interpolate(
+            latents_to_decode, size=(128, 128), mode="bilinear", align_corners=False
+        )
+    with torch.no_grad():
+        decoded = vae.decode(latents_to_decode.to(vae.dtype))
+        decoded_rgb = (
+            decoded.sample if hasattr(decoded, "sample") else decoded
+        )  # (B, C, H_img, W_img)
+    # Optional final pixel-space DC (single hard/soft pass)
+    if use_data_consistency and apply_final_pixel_dc:
+        # collapse to single-channel; if multi-channel keep average
+        decoded_gray = decoded_rgb.mean(dim=1, keepdim=True)  # (B,1,H,W)
+        target_lr = batch["lr"].to(device).float()
+        if target_lr.ndim == 3:
+            target_lr = target_lr.unsqueeze(1)  # (B,1,H_lr,W_lr)
+        # If sizes don't match, up/downsample target_lr to decoded_gray resolution
+        if target_lr.shape[-2:] != decoded_gray.shape[-2:]:
+            # using bilinear to match spatial dims
+            target_lr_resized = F.interpolate(
+                target_lr,
+                size=decoded_gray.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        else:
+            target_lr_resized = target_lr
+        # final pixel-space DC using the same soft frequency helper
+        final_gray = apply_frequency_consistency_soft(
+            decoded_gray,
+            target_lr_resized,
+            reduction_factor=dc_reduction_factor,
+            taper_width=taper,
+        )
+    else:
+        final_gray = decoded_rgb.mean(dim=1, keepdim=True)
+    image_batch = robust_mri_scale(final_gray)
+    image_batch_np = image_batch.cpu().permute(0, 2, 3, 1).numpy()
+    return image_batch_np, None
+
+
 def plot_generated_and_ground_truth(
     generated_slices_np: np.ndarray,
     batch: Dict[str, torch.Tensor],
