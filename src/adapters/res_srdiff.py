@@ -85,9 +85,20 @@ def log_validation(unet, controlnet, vae, val_dataloader, noise_scheduler, weigh
 
 def decode_to_vis(data, vae, is_latent=True):
     if is_latent:
-        data = vae.decode(data / vae.config.scaling_factor).sample
-    img = (data / 2 + 0.5).clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy()
-    return (img[0] * 255).astype(np.uint8)
+        # Decode latent to pixel space
+        decoded = vae.decode(data / vae.config.scaling_factor).sample
+    else:
+        decoded = data
+        
+    # Standardize to [0, 1] and move channels to the end: (B, C, H, W) -> (B, H, W, C)
+    img = (decoded / 2 + 0.5).clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy()
+    img_np = (img[0] * 255).astype(np.uint8)
+
+    # If image is grayscale (H, W, 1), convert to (H, W, 3)
+    if img_np.shape[-1] == 1:
+        img_np = np.concatenate([img_np] * 3, axis=-1)
+        
+    return img_np
 
 # PRE-COMPUTING THE PROMPT EMBEDS
 def get_fixed_prompt_embeds(tokenizer, text_encoder, accelerator, prompt="medical mri scan, high resolution"):
