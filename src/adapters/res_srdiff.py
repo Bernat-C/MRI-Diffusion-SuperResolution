@@ -96,6 +96,3 @@ def get_fixed_prompt_embeds(tokenizer, text_encoder, accelerator, prompt="medica
     with torch.no_grad():
         prompt_embeds = text_encoder(inputs.input_ids)[0]
     return prompt_embeds
-
-# Get one embedding and expand it to match your batch size
-fixed_embeds = get_fixed_prompt_embeds()
