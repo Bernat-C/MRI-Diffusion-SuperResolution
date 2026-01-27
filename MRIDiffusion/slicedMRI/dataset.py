@@ -32,21 +32,18 @@ class FastMRILazyDataset(Dataset):
 
     def __init__(
         self,
-        json_path: str,
-        mode: str = "train",
-        target_size: Tuple[int, int] = (512, 512),
-        contrast_filter: str = "T2",
-        strength_filter: str = "3.0T",
-        scale_factor: float = 4.0,
-        fractions: Tuple[float, float, float] = (0.8, 0.1, 0.1),
-        seed: int = 42,
+        config: DatasetConfig,
     ):
-        self.target_size = target_size
-        self.scale_factor = scale_factor
-        with open(json_path, "r") as f:
+        self.target_size = config.target_size
+        self.scale_factor = config.scale_factor
+        with open(jconfig.son_path, "r") as f:
             self.all_patient_records = json.load(f)
         self.subjects = self._get_filtered_subjects(
-            contrast_filter, strength_filter, seed, fractions, mode
+            config.contrast_filter,
+            config.strength_filter,
+            config.seed,
+            config.fractions,
+            config.mode,
         )
         self.slice_metadata = []
         self._prepare_slice_index()
