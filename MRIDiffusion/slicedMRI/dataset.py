@@ -4,8 +4,12 @@ from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 import SimpleITK as sitk
-from typing import Dict, Union
+from typing import Dict, Union, Tuple
 import scipy.ndimage
+from scipy.ndimage import gaussian_filter
+from PIL import Image
+import pydicom
+import json
 
 
 from MRIDiffusion.slicedMRI.transform_to_2D_slices import (
@@ -18,6 +22,129 @@ from MRIDiffusion.slicedMRI.transform_to_2D_slices import (
     pad_or_center_crop,
 )
 from MRIDiffusion.slicedMRI.config import DatasetConfig
+
+
+class FastMRILazyDataset(Dataset):
+    """
+    Lazy-loading dataset for FastMRI brain DICOMs.
+    Simulates Low-Field (1T) from High-Field (3T) via downsampling.
+    """
+
+    def __init__(
+        self,
+        json_path: str,
+        mode: str = "train",
+        target_size: Tuple[int, int] = (512, 512),
+        contrast_filter: str = "T2",
+        strength_filter: str = "3.0T",
+        scale_factor: float = 4.0,
+        fractions: Tuple[float, float, float] = (0.8, 0.1, 0.1),
+        seed: int = 42,
+    ):
+        self.target_size = target_size
+        self.scale_factor = scale_factor
+        with open(json_path, "r") as f:
+            self.all_patient_records = json.load(f)
+        self.subjects = self._get_filtered_subjects(
+            contrast_filter, strength_filter, seed, fractions, mode
+        )
+        self.slice_metadata = []
+        self._prepare_slice_index()
+
+    def _get_filtered_subjects(self, contrast, strength, seed, fractions, mode):
+        """Filters subjects by physics and performs patient-level split."""
+        valid_subjects = []
+        for pid, strengths in self.all_patient_records.items():
+            if strength in strengths and contrast in strengths[strength]:
+                valid_subjects.append(
+                    {
+                        "subject_id": pid,
+                        "strength": strength,
+                        "contrast": contrast,
+                        "txt": f"high quality {contrast} brain MRI, {strength} field strength, medical imaging",
+                    }
+                )
+        # Subject-level split
+        generator = torch.Generator().manual_seed(seed)
+        train, val, test = random_split(
+            valid_subjects, lengths=fractions, generator=generator
+        )
+        mapping = {"train": train, "val": val, "test": test}
+        selected = mapping.get(mode, train)
+        return [selected.dataset[i] for i in selected.indices]
+
+    def _prepare_slice_index(self):
+        """Creates a flat list of pointers to every slice for lazy access."""
+        for item in self.subjects:
+            pid = item["subject_id"]
+            strength = item["strength"]
+            contrast = item["contrast"]
+            slices = self.all_patient_records[pid][strength][contrast]
+            for s_info in slices:
+                self.slice_metadata.append(
+                    {
+                        "path": s_info["filename"],
+                        "subject_id": pid,
+                        "txt": item["txt"],
+                        "instance": s_info["instanceNumber"],
+                    }
+                )
+
+    def _pad_to_target(self, arr: np.ndarray) -> np.ndarray:
+        """Center pads the image to target_size without resizing anatomy."""
+        h, w = arr.shape
+        th, tw = self.target_size
+        pad_h = max(0, th - h)
+        pad_w = max(0, tw - w)
+        # If image is larger than target, we crop the center
+        if h > th or w > tw:
+            start_h = max(0, (h - th) // 2)
+            start_w = max(0, (w - tw) // 2)
+            arr = arr[start_h : start_h + th, start_w : start_w + tw]
+            h, w = arr.shape
+            pad_h = th - h
+            pad_w = tw - w
+        padding = (
+            (pad_h // 2, pad_h - (pad_h // 2)),
+            (pad_w // 2, pad_w - (pad_w // 2)),
+        )
+        return np.pad(arr, padding, mode="constant", constant_values=0)
+
+    def _simulate_low_res(self, hr_arr: np.ndarray) -> np.ndarray:
+        """Simulates low field/resolution via Gaussian blur and down-up sampling."""
+        # Blur to simulate lower SNR and point spread function
+        sigma = 0.5 * self.scale_factor
+        blurred = gaussian_filter(hr_arr, sigma=sigma)
+        # Downsample then upsample back to target size (Bicubic)
+        pil_img = Image.fromarray(blurred)
+        small_size = (
+            int(self.target_size[1] // self.scale_factor),
+            int(self.target_size[0] // self.scale_factor),
+        )
+        lr_img = pil_img.resize(small_size, resample=Image.BICUBIC)
+        lr_up = lr_img.resize(self.target_size, resample=Image.BICUBIC)
+        return np.array(lr_up)
+
+    def __len__(self):
+        return len(self.slice_metadata)
+
+    def __getitem__(self, idx) -> Dict:
+        meta = self.slice_metadata[idx]
+        # Lazy load DICOM
+        ds = pydicom.dcmread(meta["path"])
+        arr = ds.pixel_array.astype(np.float32)
+        # Normalize 0-1
+        if arr.max() > arr.min():
+            arr = (arr - arr.min()) / (arr.max() - arr.min())
+        hr_arr = self._pad_to_target(arr)
+        lr_arr = self._simulate_low_res(hr_arr)
+        return {
+            "hr": torch.from_numpy(hr_arr).unsqueeze(0).float(),
+            "lr": torch.from_numpy(lr_arr).unsqueeze(0).float(),
+            "txt": meta["txt"],
+            "subject_id": meta["subject_id"],
+            "instance": meta["instance"],
+        }
 
 
 class PairedMRI_MiniDataset(Dataset):

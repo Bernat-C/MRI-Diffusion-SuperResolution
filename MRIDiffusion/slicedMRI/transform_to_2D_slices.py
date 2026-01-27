@@ -4,7 +4,10 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader, random_split
 import SimpleITK as sitk
-
+import json
+from tqdm import tqdm
+from collections import defaultdict
+import pydicom
 
 from MRIDiffusion.slicedMRI.config import DatasetConfig
 
@@ -290,6 +293,84 @@ def save_paired_slices(lr_vol, hr_vol, output_dir, prefix):
             full_path = os.path.join(save_path, filename)
 
             np.savez_compressed(full_path, lr=slice_lr, hr=slice_hr)
+
+
+def get_contrast_type_fastMRI(desc):
+    """Standardizes series descriptions into contrast categories."""
+    if not isinstance(desc, str):
+        return "UNKNOWN"
+    d = desc.upper()
+    if "FLAIR" in d:
+        return "FLAIR"
+    if "T1" in d:
+        return "T1"
+    if "T2" in d:
+        return "T2"
+    if "DWI" in d or "DIFFUSION" in d:
+        return "DWI"
+    return "OTHER"
+
+
+def build_fastMRI_manifest(root_path: str, output_path: str, verbose: bool = False):
+    # Using a nested lambda for auto-creating the dictionary structure:
+    # patient_id -> field_strength -> contrast -> list of slices
+    patient_records = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    root = Path(root_path)
+    if verbose:
+        print(f"Searching for DICOM files in {root}...")
+    all_files = []
+    for p, _, files in os.walk(root):
+        for fn in files:
+            if fn.lower().endswith(".dcm"):
+                all_files.append(Path(p) / fn)
+    if verbose:
+        print(f"Found {len(all_files)} files. Extracting metadata...")
+    for dcm_path in tqdm(all_files, desc="Gathering Metadata"):
+        try:
+            # We need pixel-related metadata (Matrix, Spacing) so we read headers
+            ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True, force=True)
+            # Identify Patient, Field Strength, and Contrast
+            patient_id = str(getattr(ds, "PatientID", "UNKNOWN_PATIENT"))
+            raw_strength = getattr(ds, "MagneticFieldStrength", 0.0)
+            # Standardize strength naming (e.g., "3.0T" or "1.5T")
+            if 1.3 < float(raw_strength) < 1.7:
+                strength_key = "1.5T"
+            elif 2.8 < float(raw_strength) < 3.2:
+                strength_key = "3.0T"
+            else:
+                strength_key = f"{raw_strength}T"
+            series_desc = getattr(ds, "SeriesDescription", "UNKNOWN_SERIES")
+            contrast_key = get_contrast_type_fastMRI(series_desc)
+            slice_data = {
+                "filename": str(dcm_path),  # full path
+                "instanceNumber": int(getattr(ds, "InstanceNumber", 0)),
+                "sliceLocation": (
+                    float(getattr(ds, "SliceLocation", 0.0))
+                    if "SliceLocation" in ds
+                    else None
+                ),
+                "acquisitionMatrix": list(getattr(ds, "AcquisitionMatrix", [])),
+                "pixelSpacing": [float(x) for x in getattr(ds, "PixelSpacing", [])],
+            }
+            patient_records[patient_id][strength_key][contrast_key].append(slice_data)
+        except Exception as e:
+            # Optional: log errors to a file for massive datasets
+            if verbose:
+                print(f"[Error]: {e}")
+            continue
+    if verbose:
+        print("Sorting sequences by instance number...")
+    final_dict = {}
+    for pid, strengths in patient_records.items():
+        final_dict[pid] = {}
+        for strength, contrasts in strengths.items():
+            final_dict[pid][strength] = {}
+            for contrast, slices in contrasts.items():
+                sorted_slices = sorted(slices, key=lambda x: x["instanceNumber"])
+                final_dict[pid][strength][contrast] = sorted_slices
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(final_dict, f, indent=4)
 
 
 if __name__ == "__main__":
