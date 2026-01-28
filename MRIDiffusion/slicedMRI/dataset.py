@@ -36,7 +36,7 @@ class FastMRILazyDataset(Dataset):
     ):
         self.target_size = config.target_size
         self.scale_factor = config.scale_factor
-        with open(jconfig.son_path, "r") as f:
+        with open(config.fastMRI_manifest_json, "r") as f:
             self.all_patient_records = json.load(f)
         self.subjects = self._get_filtered_subjects(
             config.contrast_filter,
