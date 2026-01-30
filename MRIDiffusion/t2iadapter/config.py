@@ -49,3 +49,5 @@ class T2IConfig:
     ddpm_scheduler_timestep_spacing: str = "trailing"  # for zero-SNR
     ddpm_scheduler_rescale_betas_zero_snr: bool = True  # enforces pure noise at t=1000
     partial_start_step: int = 800
+    lambda_latent: float = 0.1
+    lambda_latent_image: float = 0.05

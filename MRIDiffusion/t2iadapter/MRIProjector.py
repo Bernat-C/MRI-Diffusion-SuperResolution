@@ -19,6 +19,61 @@ class MRIProjector(nn.Module):
         return torch.tanh(self.projector(x))
 
 
+class LatentMRIProjector(nn.Module):
+    """
+    A 1x1 convolution to learn the mapping from MRI latent space to RGB SD1.5 latent space
+
+    Shoule be computationally more efficient than projeting mri to rgb as we have a lower
+    spatial resolution (i.e. 64x64 compared to 512x512 spatial size)
+    Uses a kernel of size 3 because I like them but should do ablations down the line
+
+    Notes:
+        - MRI-VAE results in 2x512x512 -> 4x128x128
+        - SD1.5-VAR results in 3x512x512 -> 4x64x64
+    """
+
+    def __init__(
+        self,
+        spatial_in: int,
+        spatial_out: int,
+        in_channels: int = 4,
+        out_channels: int = 4,
+    ):
+        s = spatial_in // spatial_out
+        self.projector = nn.Conv2d(
+            in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=s
+        )
+
+    def forward(self, x):
+        return self.projector(x)
+
+
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class InverseProjectorLearned(nn.Module):
+    def __init__(
+        self, spatial_in, spatial_out, in_channels=4, out_channels=4, hidden=64
+    ):
+        super().__init__()
+        s = spatial_in // spatial_out
+        assert spatial_in % spatial_out == 0, "spatial sizes must be integer multiple"
+        self.upsample_scale = s
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, hidden, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden, out_channels, kernel_size=3, padding=1),
+        )
+
+    def forward(self, x):
+        # x: (B, C_sd, H_sd, W_sd)
+        x_up = F.interpolate(
+            x, scale_factor=self.upsample_scale, mode="bilinear", align_corners=False
+        )
+        return self.conv(x_up)  # (B, C_mri, H_mri, W_mri)
+
+
 def robust_mri_scale(tensor, pmin=0.5, pmax=99.5):
     """
     Normalizes a tensor based on percentiles to handle MRI intensity outliers.
