@@ -37,10 +37,10 @@ class T2IConfig:
     adam_epsilon: float = 1e-08
     max_grad_norm: float = 1.0
     logging_dir: str = "./logs/t2i_adapter"
-    allow_tf32: bool = False
+    allow_tf32: bool = True
     report_to: str = "wandb"
     media_reporting_step: int = 100
-    mixed_precision: Union[str, None] = None
+    mixed_precision: Union[str, None] = "bf16"
     enable_xformers_memory_efficient_attention: bool = False
     set_grads_to_none: bool = False
     proportion_empty_prompts: float = 0.1

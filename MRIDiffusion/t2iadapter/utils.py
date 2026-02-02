@@ -722,7 +722,7 @@ def generate_mri_slices_partial_latent_align_dc(
         else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
     model_name = vae.config.get("_name_or_path", "")
-    is_special_vae = "microsoft/mri-autoencoder-v0.1" in model_name
+    # is_special_vae = "microsoft/mri-autoencoder-v0.1" in model_name
     mri_projector.eval()
     adapter.eval()
     latent_projector.eval()
