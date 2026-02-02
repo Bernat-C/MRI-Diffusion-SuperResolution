@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from PIL import Image
 import numpy as np
 
-def get_res_shifting_latents(hr_latents, lr_latents, timesteps, scheduler, gamma=0.1):
+def get_res_shifting_latents(hr_latents, lr_latents, timesteps, scheduler):
     """
     Implements the Res-SRDiff shifting process.
     Moves from HR towards LR as t increases, with added variance.
@@ -19,7 +19,7 @@ def get_res_shifting_latents(hr_latents, lr_latents, timesteps, scheduler, gamma
     
     # Variance scaling
     noise = torch.randn_like(hr_latents)
-    sigma_t = gamma * ((1 - alpha_t) ** 0.5)
+    sigma_t = (1 - alpha_t) ** 0.5
     
     return mu_t + sigma_t * noise
 
@@ -46,15 +46,21 @@ def log_validation(unet, controlnet, vae, val_dataloader, noise_scheduler, weigh
     
     # Encode LR to get starting point for Res-Shifting
     lr_input = lr_raw.expand(-1, 3, -1, -1) if lr_raw.shape[1] == 1 else lr_raw
-    latents = vae.encode(lr_input).latent_dist.sample() * vae.config.scaling_factor
-    
+    lr_latents_anchor = vae.encode(lr_input).latent_dist.sample() * vae.config.scaling_factor
+
     # Setup Scheduler
     noise_scheduler.set_timesteps(num_inference_steps, device=accelerator.device)
     timesteps = noise_scheduler.timesteps
 
+    # Initialize the "Shifted" state
+    # x_T = sqrt(alpha_T)*HR + (1-sqrt(alpha_T))*LR + noise.
+    latents = get_res_shifting_latents(lr_latents_anchor, lr_latents_anchor, timesteps[0], noise_scheduler)
+
+    alphas_cumprod = noise_scheduler.alphas_cumprod.to(latents.device)
+
     # Multi-step Denoising Loop
-    for t in timesteps:
-        # 1. Predict ControlNet residuals
+    for i, t in enumerate(timesteps):
+        # Predict ControlNet residuals
         down_res, mid_res = controlnet(
             latents, t, 
             encoder_hidden_states=fixed_embeds[0:1], 
@@ -62,7 +68,7 @@ def log_validation(unet, controlnet, vae, val_dataloader, noise_scheduler, weigh
             return_dict=False
         )
 
-        # 2. Predict x0
+        # Predict HR latents (x0)
         model_pred = unet(
             latents, t, 
             encoder_hidden_states=fixed_embeds[0:1],
@@ -70,12 +76,24 @@ def log_validation(unet, controlnet, vae, val_dataloader, noise_scheduler, weigh
             mid_block_additional_residual=mid_res
         ).sample
 
-        # 3. Step (This computes x_{t-1} based on the predicted x0)
-        # Note: If using Res-SRDiff logic, you may need a custom step function 
-        # but the standard DDIM step works if model_pred is treated as x0.
-        latents = noise_scheduler.step(model_pred, t, latents).prev_sample
+        # 4. MANUAL RES-SRDIFF REVERSE STEP
+        # Manually shift from the LR anchor toward the predicted HR.
+        prev_t = timesteps[i + 1] if i + 1 < len(timesteps) else torch.tensor(0).to(accelerator.device)
+        alpha_t = alphas_cumprod[t].view(-1, 1, 1, 1)
+        alpha_t_prev = alphas_cumprod[prev_t].view(-1, 1, 1, 1)
 
-    # Decode Final Result
+        # Transition math: x_{t-1} = sqrt(alpha_{t-1})*pred_x0 + (1-sqrt(alpha_{t-1}))*LR
+        # We omit the additional variance (gamma) during inference for a cleaner SR result.
+        latents = (alpha_t_prev ** 0.5) * model_pred + (1 - alpha_t_prev ** 0.5) * lr_latents_anchor
+
+        if prev_t > 0:
+            noise = torch.randn_like(latents)
+            # Use standard DDPM variance logic or a fixed gamma as per the Res-SRDiff paper
+            variance = ((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev)) ** 0.5
+            latents = latents + variance * noise
+
+    # 5. Decode Final Result
+    # Remember to reverse the [-1, 1] normalization in decode_to_vis
     gen_vis = decode_to_vis(latents, vae)
     hr_vis = decode_to_vis(hr_raw, vae, is_latent=False)
     lr_vis = decode_to_vis(lr_raw, vae, is_latent=False)
