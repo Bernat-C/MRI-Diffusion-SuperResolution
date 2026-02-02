@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
 
 
 class MRIProjector(nn.Module):
@@ -39,6 +40,7 @@ class LatentMRIProjector(nn.Module):
         in_channels: int = 4,
         out_channels: int = 4,
     ):
+        super().__init__()
         s = spatial_in // spatial_out
         self.projector = nn.Conv2d(
             in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=s
@@ -47,18 +49,12 @@ class LatentMRIProjector(nn.Module):
     def forward(self, x):
         return self.projector(x)
 
-
-import torch.nn as nn
-import torch.nn.functional as F
-
-
 class InverseProjectorLearned(nn.Module):
     def __init__(
         self, spatial_in, spatial_out, in_channels=4, out_channels=4, hidden=64
     ):
         super().__init__()
-        s = spatial_in // spatial_out
-        assert spatial_in % spatial_out == 0, "spatial sizes must be integer multiple"
+        s = spatial_out // spatial_in
         self.upsample_scale = s
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, hidden, kernel_size=3, padding=1),

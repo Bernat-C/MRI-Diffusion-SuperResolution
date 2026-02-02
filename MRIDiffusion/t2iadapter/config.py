@@ -19,7 +19,7 @@ class T2IConfig:
     test_batch_size: int = 16
     num_train_epochs: int = 200
     max_train_steps: int = 4000
-    checkpointing_steps: int = 500
+    checkpointing_steps: int = 2000
     gradient_accumulation_steps: int = 1
     gradient_checkpointing: bool = True
     learning_rate: float = 1e-5
