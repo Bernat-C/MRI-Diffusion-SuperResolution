@@ -159,7 +159,7 @@ def crop_volume_along_z_np(np_vol_hw_d, z0, z1, axis_is_hw_d=True):
     else:
         raise ValueError("Unexpected array dims")
 
-def pad_or_center_crop(tensor2d):
+def pad_or_center_crop(tensor2d, pad_value=-1.0): # Pad value should be the minimum value. 
         TARGET_H = 512
         TARGET_W = 512
         H, W = tensor2d.shape
@@ -183,7 +183,7 @@ def pad_or_center_crop(tensor2d):
         if pad_h > 0 or pad_w > 0:
             import torch.nn.functional as F
             # F.pad expects (pad_left, pad_right, pad_top, pad_bottom)
-            tensor2d = F.pad(tensor2d.unsqueeze(0), (pad_left, pad_right, pad_top, pad_bottom), mode='constant', value=0.0).squeeze(0)
+            tensor2d = F.pad(tensor2d.unsqueeze(0), (pad_left, pad_right, pad_top, pad_bottom), mode='constant', value=pad_value).squeeze(0)
 
         return tensor2d
 
@@ -276,9 +276,17 @@ class SliceDataset(Dataset):
 
                 a_min_hr, a_max_hr = float(self.hr_clip[0]), float(self.hr_clip[1])
                 a_min_lr, a_max_lr = float(self.lr_clip[0]), float(self.lr_clip[1])
-                # final clamp and cast
-                hr_arr = np.clip((hr_arr - a_min_hr) / (a_max_hr - a_min_hr), 0.0, 1.0).astype(np.float32)
-                lr_arr = np.clip((lr_arr - a_min_lr) / (a_max_lr - a_min_lr), 0.0, 1.0).astype(np.float32)
+                
+                # [0,1] normalisation
+                # hr_arr = np.clip((hr_arr - a_min_hr) / (a_max_hr - a_min_hr), 0.0, 1.0).astype(np.float32)
+                # lr_arr = np.clip((lr_arr - a_min_lr) / (a_max_lr - a_min_lr), 0.0, 1.0).astype(np.float32)
+
+                # TO THIS (Mapping to [-1, 1]):
+                hr_arr = (hr_arr - a_min_hr) / (a_max_hr - a_min_hr)
+                hr_arr = np.clip(hr_arr * 2.0 - 1.0, -1.0, 1.0).astype(np.float32)
+
+                lr_arr = (lr_arr - a_min_lr) / (a_max_lr - a_min_lr)
+                lr_arr = np.clip(lr_arr * 2.0 - 1.0, -1.0, 1.0).astype(np.float32) 
 
                 # Save cache
                 np.savez_compressed(cache_file, hr=hr_arr, lr=lr_arr)
