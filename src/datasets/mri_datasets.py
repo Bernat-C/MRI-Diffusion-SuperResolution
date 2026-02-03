@@ -281,12 +281,12 @@ class SliceDataset(Dataset):
                 # hr_arr = np.clip((hr_arr - a_min_hr) / (a_max_hr - a_min_hr), 0.0, 1.0).astype(np.float32)
                 # lr_arr = np.clip((lr_arr - a_min_lr) / (a_max_lr - a_min_lr), 0.0, 1.0).astype(np.float32)
 
-                # TO THIS (Mapping to [-1, 1]):
+                # (Mapping to [-1, 1]):
                 hr_arr = (hr_arr - a_min_hr) / (a_max_hr - a_min_hr)
-                hr_arr = np.clip(hr_arr * 2.0 - 1.0, -1.0, 1.0).astype(np.float32)
+                hr_arr = (np.clip(hr_arr, 0.0, 1.0) * 2.0 - 1.0).astype(np.float32)
 
                 lr_arr = (lr_arr - a_min_lr) / (a_max_lr - a_min_lr)
-                lr_arr = np.clip(lr_arr * 2.0 - 1.0, -1.0, 1.0).astype(np.float32) 
+                lr_arr = (np.clip(lr_arr, 0.0, 1.0) * 2.0 - 1.0).astype(np.float32) 
 
                 # Save cache
                 np.savez_compressed(cache_file, hr=hr_arr, lr=lr_arr)

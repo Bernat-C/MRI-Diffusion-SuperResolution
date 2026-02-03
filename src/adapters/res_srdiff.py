@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from PIL import Image
 import numpy as np
 
-def get_res_shifting_latents(hr_latents, lr_latents, timesteps, scheduler):
+def get_res_shifting_latents(hr_latents, lr_latents, timesteps, scheduler, noise=None):
     """
     Implements the Res-SRDiff shifting process.
     Moves from HR towards LR as t increases, with added variance.
@@ -16,9 +16,10 @@ def get_res_shifting_latents(hr_latents, lr_latents, timesteps, scheduler):
     # Res-SRDiff Shifting: x_t = sqrt(alpha_t)*HR + (1-sqrt(alpha_t))*LR + noise
     # As t -> max, alpha_t -> 0, so x_t becomes LR + noise
     mu_t = (alpha_t ** 0.5) * hr_latents + (1 - (alpha_t ** 0.5)) * lr_latents
-    
+
     # Variance scaling
-    noise = torch.randn_like(hr_latents)
+    if noise is None:
+        noise = torch.randn_like(hr_latents)
     sigma_t = (1 - alpha_t) ** 0.5
     
     return mu_t + sigma_t * noise
@@ -69,22 +70,24 @@ def log_validation(unet, controlnet, vae, val_dataloader, noise_scheduler, weigh
         )
 
         # Predict HR latents (x0)
-        model_pred = unet(
+        epsilon_pred = unet(
             latents, t, 
             encoder_hidden_states=fixed_embeds[0:1],
             down_block_additional_residuals=down_res,
             mid_block_additional_residual=mid_res
         ).sample
 
-        # 4. MANUAL RES-SRDIFF REVERSE STEP
+        # MANUAL RES-SRDIFF REVERSE STEP
         # Manually shift from the LR anchor toward the predicted HR.
+        # Derive x0_pred from epsilon_pred
+        # Based on: x_t = sqrt(alpha_t)*x_0 + (1-sqrt(alpha_t))*LR + sqrt(1-alpha_t)*epsilon
         prev_t = timesteps[i + 1] if i + 1 < len(timesteps) else torch.tensor(0).to(accelerator.device)
         alpha_t = alphas_cumprod[t].view(-1, 1, 1, 1)
+        x0_pred = (latents - (1 - alpha_t**0.5) * lr_latents_anchor - (1 - alpha_t)**0.5 * epsilon_pred) / (alpha_t**0.5)
+        
+        # Transition to t-1
         alpha_t_prev = alphas_cumprod[prev_t].view(-1, 1, 1, 1)
-
-        # Transition math: x_{t-1} = sqrt(alpha_{t-1})*pred_x0 + (1-sqrt(alpha_{t-1}))*LR
-        # We omit the additional variance (gamma) during inference for a cleaner SR result.
-        latents = (alpha_t_prev ** 0.5) * model_pred + (1 - alpha_t_prev ** 0.5) * lr_latents_anchor
+        latents = (alpha_t_prev ** 0.5) * x0_pred + (1 - alpha_t_prev ** 0.5) * lr_latents_anchor
 
         if prev_t > 0:
             noise = torch.randn_like(latents)
