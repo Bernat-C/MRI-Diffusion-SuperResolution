@@ -437,7 +437,7 @@ def apply_frequency_consistency_soft(
     B, C, H, W = latents_pred.shape
     # FFT (complex)
     fft_pred: torch.Tensor = torch.fft.fftshift(
-        torch.fft.fft2(latents_pred, norm="ortho"), dim=(-2, -1)
+        torch.fft.fft2(latents_pred.float(), norm="ortho"), dim=(-2, -1)
     )
     fft_cond: torch.Tensor = torch.fft.fftshift(
         torch.fft.fft2(latents_cond.float(), norm="ortho"), dim=(-2, -1)
