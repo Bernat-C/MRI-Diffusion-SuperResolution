@@ -70,12 +70,12 @@ class InverseProjectorLearned(nn.Module):
         return self.conv(x_up)  # (B, C_mri, H_mri, W_mri)
 
 
-def robust_mri_scale(tensor, pmin=0.5, pmax=99.5):
+def robust_mri_scale(tensor: torch.Tensor, pmin=0.5, pmax=99.5):
     """
     Normalizes a tensor based on percentiles to handle MRI intensity outliers.
     """
     b, c, h, w = tensor.shape
-    flat = tensor.view(b, -1)
+    flat = tensor.float().view(b, -1)
 
     # Calculate quantiles per batch item
     mi = torch.quantile(flat, pmin / 100.0, dim=1, keepdim=True).view(b, 1, 1, 1)

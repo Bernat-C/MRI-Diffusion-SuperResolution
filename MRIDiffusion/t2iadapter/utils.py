@@ -393,7 +393,7 @@ def make_lowpass_mask(
     w: int,
     reduction_factor: float,
     device: torch.device,
-    taper_width: float = 0.12,
+    taper_width: float = 0.4,
 ):
     cy, cx = h // 2, w // 2
     half_h = max(1, int(h / (2.0 * reduction_factor)))
@@ -440,7 +440,7 @@ def apply_frequency_consistency_soft(
         torch.fft.fft2(latents_pred, norm="ortho"), dim=(-2, -1)
     )
     fft_cond: torch.Tensor = torch.fft.fftshift(
-        torch.fft.fft2(latents_cond, norm="ortho"), dim=(-2, -1)
+        torch.fft.fft2(latents_cond.float(), norm="ortho"), dim=(-2, -1)
     )
     mask = make_lowpass_mask(
         h=H,
@@ -473,8 +473,8 @@ def generate_mri_slices_partial_dc(
     num_inference_steps: int = 500,
     weight_dtype: torch.dtype = torch.float16,
     use_data_consistency: bool = True,
-    dc_reduction_factor: float = 4.0,
-    taper: float = 0.12,
+    dc_reduction_factor: float = 1.5,
+    taper: float = 0.45,
     apply_final_pixel_dc: bool = True,
     vae_scale: float = None,
 ):
@@ -647,12 +647,9 @@ def generate_mri_slices_partial_dc(
     return image_batch_np, None
 
 
-def generate_mri_slices_partial_latent_align_dc(
+def generate_mri_slices_partial_latent_align_dc_no_t2i(
     batch: Dict[str, torch.Tensor],
-    adapter: torch.nn.Module,
     mri_projector: torch.nn.Module,
-    latent_projector: torch.nn.Module,
-    inverse_latent_projector: torch.nn.Module,
     unet: UNet2DConditionModel,
     vae: AutoencoderKL,
     noise_scheduler: DDPMScheduler,
@@ -662,8 +659,141 @@ def generate_mri_slices_partial_latent_align_dc(
     num_inference_steps: int = 500,
     weight_dtype: torch.dtype = torch.float16,
     use_data_consistency: bool = True,
-    dc_reduction_factor: float = 4.0,
-    taper: float = 0.12,
+    dc_reduction_factor: float = 1.5,
+    taper: float = 0.45,
+    apply_final_pixel_dc: bool = True,
+    vae_scale: float = None,
+):
+    device = (
+        accelerator.device
+        if accelerator is not None
+        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    # is_special_vae = "microsoft/mri-autoencoder-v0.1" in model_name
+    mri_projector.eval()
+    unet.eval()
+    with torch.no_grad():
+        # Prepare conditioning RGB (projector may do channel conversion / scaling)
+        condition_rgb = mri_projector(batch["lr"].to(device).float())
+        # Encode LR (clean latent) -- adapt to your VAE API
+        enc = vae.encode(condition_rgb.to(vae.dtype))
+        latents_lr_clean = (
+            enc.latent_dist.sample() if hasattr(enc, "latent_dist") else enc
+        )
+    if vae_scale is None:
+        vae_scale = getattr(
+            getattr(vae_encoder, "config", {}), "scaling_factor", None
+        ) or getattr(vae_encoder, "scaling_factor", 1.0)
+    latents_lr_clean: torch.Tensor = latents_lr_clean * vae_scale
+    latents_lr_clean = latents_lr_clean.to(weight_dtype)
+    # Initialize noise
+    noise_init = torch.randn_like(latents_lr_clean, device=device)
+    # SDEEdit-style init: add noise at start_step using the SAME noise_init
+    bsz = latents_lr_clean.shape[0]
+    timesteps_start = torch.full(
+        (bsz,), int(start_step), device=device, dtype=torch.long
+    )
+    latents_gen = noise_scheduler.add_noise(
+        latents_lr_clean, noise_init, timesteps_start
+    )
+    latents_gen = torch.cat([latents_gen, latents_lr_clean], dim=1)
+    noise_scheduler.set_timesteps(num_inference_steps, device=device)
+    # Only keep timesteps that are <= start_step (we will denoise from start_step downwards)
+    inference_timesteps = [t for t in noise_scheduler.timesteps if t <= start_step]
+    inference_timesteps = torch.tensor(inference_timesteps, device=device)
+    for t in tqdm(
+        inference_timesteps,
+        disable=(accelerator is not None and not accelerator.is_local_main_process),
+        leave=False,
+    ):
+        # scale model input (scheduler-specific)
+        latent_model_input = noise_scheduler.scale_model_input(latents_gen, t)
+        with torch.no_grad():
+            unet_out = unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states=prompt_embeds,
+            )
+            noise_pred = unet_out.sample if hasattr(unet_out, "sample") else unet_out
+        step_output = noise_scheduler.step(noise_pred, t, latents_gen)
+        latents_gen = step_output.prev_sample
+        # Apply latent-space data consistency (soft replacement) if requested
+        if use_data_consistency:
+            # compute noisy-lr at the same timestep using the SAME noise_init
+            ts_cur = torch.full(
+                (bsz,),
+                int(t.item()) if isinstance(t, torch.Tensor) else int(t),
+                device=device,
+                dtype=torch.long,
+            )
+            noisy_lr_at_t = noise_scheduler.add_noise(
+                latents_lr_clean, noise_init, ts_cur
+            )
+            # soft frequency replacement on *noisy* latents (keeps noise alignment)
+            latents_gen = apply_frequency_consistency_soft(
+                latents_gen,
+                noisy_lr_at_t,
+                reduction_factor=dc_reduction_factor,
+                taper_width=taper,
+            )
+    vae_decoding_scale = getattr(
+        getattr(vae, "config", {}), "scaling_factor", None
+    ) or getattr(vae)
+    latents_to_decode = latents_gen.float() / float(vae_decoding_scale)
+    with torch.no_grad():
+        decoded = vae.decode(latents_to_decode.to(vae.dtype))
+        decoded_rgb = (
+            decoded.sample if hasattr(decoded, "sample") else decoded
+        )  # (B, C, H_img, W_img)
+    # Optional final pixel-space DC (single hard/soft pass)
+    if use_data_consistency and apply_final_pixel_dc:
+        # collapse to single-channel; if multi-channel keep average
+        decoded_gray = decoded_rgb.mean(dim=1, keepdim=True)  # (B,1,H,W)
+        target_lr = batch["lr"].to(device).float()
+        if target_lr.ndim == 3:
+            target_lr = target_lr.unsqueeze(1)  # (B,1,H_lr,W_lr)
+        # If sizes don't match, up/downsample target_lr to decoded_gray resolution
+        if target_lr.shape[-2:] != decoded_gray.shape[-2:]:
+            # using bilinear to match spatial dims
+            target_lr_resized = F.interpolate(
+                target_lr,
+                size=decoded_gray.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        else:
+            target_lr_resized = target_lr
+        # final pixel-space DC using the same soft frequency helper
+        final_gray = apply_frequency_consistency_soft(
+            decoded_gray,
+            target_lr_resized,
+            reduction_factor=dc_reduction_factor,
+            taper_width=taper,
+        )
+    else:
+        final_gray = decoded_rgb.mean(dim=1, keepdim=True)
+    image_batch = robust_mri_scale(final_gray)
+    image_batch_np = image_batch.cpu().permute(0, 2, 3, 1).numpy()
+    return image_batch_np, None
+
+
+def generate_mri_slices_partial_latent_align_dc(
+    batch: Dict[str, torch.Tensor],
+    adapter: torch.nn.Module,
+    mri_projector: torch.nn.Module,
+    latent_projector: torch.nn.Module,
+    unet: UNet2DConditionModel,
+    vae_encoder: AutoencoderKL,
+    vae_decoder: AutoencoderKL,
+    noise_scheduler: DDPMScheduler,
+    prompt_embeds: torch.Tensor,
+    start_step: int,
+    accelerator: Accelerator,
+    num_inference_steps: int = 500,
+    weight_dtype: torch.dtype = torch.float16,
+    use_data_consistency: bool = True,
+    dc_reduction_factor: float = 1.5,
+    taper: float = 0.45,
     apply_final_pixel_dc: bool = True,
     vae_scale: float = None,
 ):
@@ -721,26 +851,24 @@ def generate_mri_slices_partial_latent_align_dc(
         if accelerator is not None
         else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
-    model_name = vae.config.get("_name_or_path", "")
     # is_special_vae = "microsoft/mri-autoencoder-v0.1" in model_name
     mri_projector.eval()
     adapter.eval()
     latent_projector.eval()
-    inverse_latent_projector.eval()
     with torch.no_grad():
         # Prepare conditioning RGB (projector may do channel conversion / scaling)
         condition_rgb = mri_projector(batch["lr"].to(device).float())
         down_block_res = adapter(condition_rgb)
         # Encode LR (clean latent) -- adapt to your VAE API
-        enc = vae.encode(condition_rgb.to(vae.dtype))
+        enc = vae_encoder.encode(condition_rgb.to(vae_encoder.dtype))
         latents_lr_clean = (
             enc.latent_dist.sample() if hasattr(enc, "latent_dist") else enc
         )
     if vae_scale is None:
         vae_scale = getattr(
-            getattr(vae, "config", {}), "scaling_factor", None
-        ) or getattr(vae, "scaling_factor", 1.0)
-    latents_lr_clean = latents_lr_clean * vae_scale
+            getattr(vae_encoder, "config", {}), "scaling_factor", None
+        ) or getattr(vae_encoder, "scaling_factor", 1.0)
+    latents_lr_clean: torch.Tensor = latents_lr_clean * vae_scale
     latents_lr_clean = latents_lr_clean.to(weight_dtype)
     with torch.no_grad():
         latents_lr_clean = latent_projector(latents_lr_clean)
@@ -796,15 +924,12 @@ def generate_mri_slices_partial_latent_align_dc(
                 reduction_factor=dc_reduction_factor,
                 taper_width=taper,
             )
-    latents_to_decode = latents_gen.float() / float(vae_scale)
-    # need to map back from rgb sd1.5 latent space to mri latenet space
-    # if is_special_vae:
-    #     latents_to_decode = F.interpolate(
-    #         latents_to_decode, size=(128, 128), mode="bilinear", align_corners=False
-    #     )
+    vae_decoding_scale = getattr(
+        getattr(vae_decoder, "config", {}), "scaling_factor", None
+    ) or getattr(vae_decoder, "scaling_factor", 1.0)
+    latents_to_decode = latents_gen.float() / float(vae_decoding_scale)
     with torch.no_grad():
-        latents_to_decode = inverse_latent_projector(latents_to_decode)
-        decoded = vae.decode(latents_to_decode.to(vae.dtype))
+        decoded = vae_decoder.decode(latents_to_decode.to(vae_decoder.dtype))
         decoded_rgb = (
             decoded.sample if hasattr(decoded, "sample") else decoded
         )  # (B, C, H_img, W_img)

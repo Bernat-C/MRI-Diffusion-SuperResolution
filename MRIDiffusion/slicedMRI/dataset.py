@@ -120,8 +120,10 @@ class FastMRILazyDataset(Dataset):
         )
         lr_img = pil_img.resize(small_size, resample=Image.BICUBIC)
         lr_up = lr_img.resize(self.target_size, resample=Image.BICUBIC)
-        return np.array(lr_up)
-
+        # blur can result in images which are not normalized to (0.0, 1,0)
+        lr_up_arr = np.array(lr_up)
+        return (lr_up_arr - lr_up_arr.min()) / (lr_up_arr.max() - lr_up_arr.min())
+    
     def __len__(self):
         return len(self.slice_metadata)
 
