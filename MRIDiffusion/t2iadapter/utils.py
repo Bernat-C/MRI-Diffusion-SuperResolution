@@ -569,7 +569,7 @@ def generate_mri_slices_partial_dc(
     inference_timesteps = torch.tensor(inference_timesteps, device=device)
     for t in tqdm(
         inference_timesteps,
-        disable=(accelerator is not None and not accelerator.is_local_main_process),
+        disable=True,
         leave=False,
     ):
         # scale model input (scheduler-specific)
@@ -703,7 +703,7 @@ def generate_mri_slices_partial_latent_align_dc_no_t2i(
     for i, t in tqdm(
         enumerate(inference_timesteps),
         total=len(inference_timesteps),
-        disable=(accelerator is not None and not accelerator.is_local_main_process),
+        disable=True,
         leave=False,
     ):
         latent_model_input = torch.cat([latents_gen, latents_lr_clean], dim=1)
