@@ -682,8 +682,8 @@ def generate_mri_slices_partial_latent_align_dc_no_t2i(
         )
     if vae_scale is None:
         vae_scale = getattr(
-            getattr(vae_encoder, "config", {}), "scaling_factor", None
-        ) or getattr(vae_encoder, "scaling_factor", 1.0)
+            getattr(vae, "config", {}), "scaling_factor", None
+        ) or getattr(vae, "scaling_factor", 1.0)
     latents_lr_clean: torch.Tensor = latents_lr_clean * vae_scale
     latents_lr_clean = latents_lr_clean.to(weight_dtype)
     # Initialize noise
@@ -696,18 +696,19 @@ def generate_mri_slices_partial_latent_align_dc_no_t2i(
     latents_gen = noise_scheduler.add_noise(
         latents_lr_clean, noise_init, timesteps_start
     )
-    latents_gen = torch.cat([latents_gen, latents_lr_clean], dim=1)
     noise_scheduler.set_timesteps(num_inference_steps, device=device)
     # Only keep timesteps that are <= start_step (we will denoise from start_step downwards)
     inference_timesteps = [t for t in noise_scheduler.timesteps if t <= start_step]
     inference_timesteps = torch.tensor(inference_timesteps, device=device)
-    for t in tqdm(
-        inference_timesteps,
+    for i, t in tqdm(
+        enumerate(inference_timesteps),
+        total=len(inference_timesteps),
         disable=(accelerator is not None and not accelerator.is_local_main_process),
         leave=False,
     ):
+        latent_model_input = torch.cat([latents_gen, latents_lr_clean], dim=1)
         # scale model input (scheduler-specific)
-        latent_model_input = noise_scheduler.scale_model_input(latents_gen, t)
+        latent_model_input = noise_scheduler.scale_model_input(latent_model_input, t)
         with torch.no_grad():
             unet_out = unet(
                 latent_model_input,
@@ -719,23 +720,24 @@ def generate_mri_slices_partial_latent_align_dc_no_t2i(
         latents_gen = step_output.prev_sample
         # Apply latent-space data consistency (soft replacement) if requested
         if use_data_consistency:
-            # compute noisy-lr at the same timestep using the SAME noise_init
-            ts_cur = torch.full(
-                (bsz,),
-                int(t.item()) if isinstance(t, torch.Tensor) else int(t),
-                device=device,
-                dtype=torch.long,
-            )
-            noisy_lr_at_t = noise_scheduler.add_noise(
-                latents_lr_clean, noise_init, ts_cur
-            )
-            # soft frequency replacement on *noisy* latents (keeps noise alignment)
-            latents_gen = apply_frequency_consistency_soft(
-                latents_gen,
-                noisy_lr_at_t,
-                reduction_factor=dc_reduction_factor,
-                taper_width=taper,
-            )
+            if i + 1 < len(inference_timesteps):
+                next_t = inference_timesteps[i + 1]
+                ts_target = torch.full(
+                    (bsz,),
+                    int(next_t),
+                    device=device,
+                    dtype=torch.long,
+                )
+                noisy_lr_target = noise_scheduler.add_noise(
+                    latents_lr_clean, noise_init, ts_target
+                )
+                # soft frequency replacement on *noisy* latents (keeps noise alignment)
+                latents_gen = apply_frequency_consistency_soft(
+                    latents_gen,
+                    noisy_lr_target,
+                    reduction_factor=dc_reduction_factor,
+                    taper_width=taper,
+                )
     vae_decoding_scale = getattr(
         getattr(vae, "config", {}), "scaling_factor", None
     ) or getattr(vae)
