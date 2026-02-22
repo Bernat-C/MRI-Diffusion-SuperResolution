@@ -740,7 +740,7 @@ def generate_mri_slices_partial_latent_align_dc_no_t2i(
                 )
     vae_decoding_scale = getattr(
         getattr(vae, "config", {}), "scaling_factor", None
-    ) or getattr(vae)
+    ) or getattr(vae, "scaling_factor", 1.0)
     latents_to_decode = latents_gen.float() / float(vae_decoding_scale)
     with torch.no_grad():
         decoded = vae.decode(latents_to_decode.to(vae.dtype))
@@ -964,7 +964,7 @@ def generate_mri_slices_partial_latent_align_dc(
         final_gray = decoded_rgb.mean(dim=1, keepdim=True)
     image_batch = robust_mri_scale(final_gray)
     image_batch_np = image_batch.cpu().permute(0, 2, 3, 1).numpy()
-    return image_batch_np, None
+    return image_batch_np, decoded_gray
 
 
 def plot_generated_and_ground_truth(
