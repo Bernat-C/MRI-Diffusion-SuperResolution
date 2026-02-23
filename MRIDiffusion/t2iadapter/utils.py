@@ -1113,7 +1113,7 @@ def generate_mri_slices_partial_latent_align_dc_lora(
         final_gray = decoded_rgb.mean(dim=1, keepdim=True)
     image_batch = robust_mri_scale(final_gray)
     image_batch_np = image_batch.cpu().permute(0, 2, 3, 1).numpy()
-    return image_batch_np, decoded_gray
+    return image_batch_np, decoded_rgb
 
 
 def generate_mri_slices_partial_latent_align_dc_controlnet(
