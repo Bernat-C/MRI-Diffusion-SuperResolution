@@ -961,6 +961,7 @@ def generate_mri_slices_partial_latent_align_dc(
             taper_width=taper,
         )
     else:
+        decoded_gray = decoded_rgb.mean(dim=1, keepdim=True)
         final_gray = decoded_rgb.mean(dim=1, keepdim=True)
     image_batch = robust_mri_scale(final_gray)
     image_batch_np = image_batch.cpu().permute(0, 2, 3, 1).numpy()
