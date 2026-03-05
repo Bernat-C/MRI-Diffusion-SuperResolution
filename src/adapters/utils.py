@@ -113,7 +113,7 @@ def encode_prompt(prompt_batch, text_encoders, tokenizers, proportion_empty_prom
     return prompt_embeds, pooled_prompt_embeds
 
 
-# Simplified encode_prompt for SD1.5 (replace your existing function)
+# Simplified encode_prompt for SD1.5
 def encode_prompt_sd1x5(prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, is_train=True):
     captions = []
     for caption in prompt_batch:

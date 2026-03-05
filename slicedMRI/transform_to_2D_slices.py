@@ -32,7 +32,6 @@ def get_data_dicts(data_dir):
           anat_dir = session_dir / 'anat'
 
           # Find the NIfTI file in the LR anat folder
-          # Use .search() if you know the suffix, or .glob()
           lr_files = list(anat_dir.glob('*T1w.nii.gz'))
           if not lr_files:
               continue # Skip if no NIfTI file

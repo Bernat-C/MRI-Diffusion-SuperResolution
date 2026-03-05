@@ -332,7 +332,6 @@ class SliceDataset(Dataset):
         hr_slice = pad_or_center_crop(hr_slice)
         lr_slice = pad_or_center_crop(lr_slice)
 
-        # If you want explicit shape [1,H,W], add channel back
         hr_slice = hr_slice.unsqueeze(0)  # [1,H,W]
         lr_slice = lr_slice.unsqueeze(0)
 

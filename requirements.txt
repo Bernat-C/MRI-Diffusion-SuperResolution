@@ -1,0 +1,15 @@
+accelerate==1.11.0
+dicom2nifti==2.6.2
+matplotlib==3.10.8
+monai==1.5.1
+nibabel==5.4.0
+numpy==2.4.2
+opencv_python==4.12.0.88
+Pillow==12.1.1
+pydicom==3.0.1
+SimpleITK==2.5.3
+skimage==0.0
+torch==2.9.1+cpu
+torchmetrics==1.8.2
+tqdm==4.67.1
+transformers==4.57.1
