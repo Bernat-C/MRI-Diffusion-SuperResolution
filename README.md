@@ -1,6 +1,6 @@
 # Super-Resolution for MRI with Diffusion Models
 
-This repository contains the implementation for our paper on MRI Super-Resolution (SR) using generative priors from large-scale diffusion models pre-trained on natural images. We investigate Parameter-Efficient Fine-Tuning (PEFT) methods — **T2I-Adapter**, **ControlNet**, **LoRA**, and training from scratch — to adapt Stable Diffusion 1.5 for enhancing low-field MRI scans to high-field quality. Additionally, we implement a **Spectral Predictor-Corrector (PC) inference** scheme with partial diffusion initialization to enforce anatomical fidelity and reduce hallucinations, and adapt the **ResDiff** architecture as a baseline.
+This repository contains the implementation for our paper on MRI Super-Resolution (SR) using generative priors from large-scale diffusion models pre-trained on natural images. We investigate Parameter-Efficient Fine-Tuning (PEFT) methods (**T2I-Adapter**, **ControlNet**, **LoRA**, and training from scratch) to adapt Stable Diffusion 1.5 for enhancing low-field MRI scans to high-field quality. Additionally, we implement a **Spectral Predictor-Corrector (PC) inference** scheme with partial diffusion initialization to enforce anatomical fidelity and reduce hallucinations, and adapt the **ResDiff** architecture as a baseline.
 
 ## Key Findings
 
