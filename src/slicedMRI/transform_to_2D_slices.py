@@ -9,7 +9,7 @@ from tqdm import tqdm
 from collections import defaultdict
 import pydicom
 
-from MRIDiffusion.slicedMRI.config import DatasetConfig
+from src.slicedMRI.config import DatasetConfig
 
 
 def get_data_dicts(args: DatasetConfig):

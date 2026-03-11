@@ -14,9 +14,9 @@ from diffusers import (
 )
 from tqdm import tqdm
 
-from MRIDiffusion.t2iadapter.config import T2IConfig
-from MRIDiffusion.slicedMRI.config import DatasetConfig
-from MRIDiffusion.t2iadapter.MRIProjector import robust_mri_scale
+from src.t2iadapter.config import T2IConfig
+from src.slicedMRI.config import DatasetConfig
+from src.t2iadapter.MRIProjector import robust_mri_scale
 
 
 def import_model_class_from_model_name_or_path(
